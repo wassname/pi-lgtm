@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/86b09bd1-6882-4b0c-be20-ea866dd44b6a
 
 ## Features
 
-- **6 LLM-callable tools** — `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop` — matching Claude Code's exact tool specs and descriptions
+- **7 LLM-callable tools** — `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, `TaskExecute` — matching Claude Code's exact tool specs and descriptions
 - **Persistent widget** — live task list above the editor with `✔`/`◼`/`◻` status icons, strikethrough for completed tasks, star spinner (`✳✽`) for active tasks with elapsed time and token counts
 - **System-reminder injection** — periodic `<system-reminder>` nudges appended to tool results when task tools haven't been used recently (matches Claude Code's behavior)
 - **Task state persistence** — current task state injected into system prompt on every agent loop, surviving context compaction
@@ -21,6 +21,7 @@ https://github.com/user-attachments/assets/86b09bd1-6882-4b0c-be20-ea866dd44b6a
 - **Shared task lists** — multiple pi sessions can share a file-backed task list for agent team coordination
 - **File locking** — concurrent access is safe when multiple sessions share a task list
 - **Background process tracking** — track spawned processes with output buffering, blocking wait, and graceful stop
+- **Subagent integration** — tasks with `agentType` can be executed as subagents via `TaskExecute` (requires [pi-chonky-subagents](https://github.com/tintinweb/pi-subagents)). Auto-cascade mode flows through the task DAG automatically when enabled.
 
 ## Install
 
@@ -64,6 +65,7 @@ Create a structured task. Used proactively for complex multi-step work.
 | `subject` | string | yes | Brief imperative title |
 | `description` | string | yes | Detailed context and acceptance criteria |
 | `activeForm` | string | no | Present continuous form for spinner (e.g., "Running tests") |
+| `agentType` | string | no | Agent type for subagent execution (e.g., `"general-purpose"`, `"Explore"`) |
 | `metadata` | object | no | Arbitrary key-value pairs |
 
 ```
@@ -143,6 +145,21 @@ Stop a running background task process. Sends SIGTERM, waits 5 seconds, then SIG
 |-----------|------|-------------|
 | `task_id` | string | Task ID to stop |
 
+### `TaskExecute`
+
+Execute one or more tasks as background subagents. Requires [pi-chonky-subagents](https://github.com/tintinweb/pi-subagents).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `task_ids` | string[] | Task IDs to execute (required) |
+| `additional_context` | string | Extra context appended to each agent's prompt |
+| `model` | string | Model override (e.g., `"sonnet"`, `"haiku"`) |
+| `max_turns` | number | Max turns per agent |
+
+Tasks must be `pending`, have `agentType` set, and all `blockedBy` dependencies `completed`. Each task spawns as an independent background subagent.
+
+With **auto-cascade** enabled (via `/tasks` → Settings), completed tasks automatically trigger execution of their unblocked dependents — flowing through the DAG like a build system.
+
 ## Task Lifecycle
 
 ```
@@ -180,19 +197,21 @@ Interactive menu:
 Tasks
 ├─ View all tasks (4)
 ├─ Create task
+├─ Settings
 └─ Clear completed (1)
 ```
 
 - **View all tasks** — select a task to see details and take actions (start, complete, delete)
 - **Create task** — input prompts for subject and description
+- **Settings** — toggle auto-cascade (auto-execute unblocked agent tasks on completion)
 - **Clear completed** — remove all completed tasks
 
 ## Architecture
 
 ```
 src/
-├── index.ts            # Extension entry: 6 tools + /tasks command + widget
-├── types.ts            # Task, TaskStatus, BackgroundProcess types
+├── index.ts            # Extension entry: 7 tools + /tasks command + widget + subagent integration
+├── types.ts            # Task, TaskStatus, BackgroundProcess, SubagentBridge types
 ├── task-store.ts       # File-backed store with CRUD, dependencies, locking
 ├── process-tracker.ts  # Background process output buffering and stop
 └── ui/

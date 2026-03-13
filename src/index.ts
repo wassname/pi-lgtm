@@ -8,6 +8,7 @@
  *   TaskUpdate   — Update task fields, status, dependencies
  *   TaskOutput   — Get output from a background task process
  *   TaskStop     — Stop a running background task process
+ *   TaskExecute  — Execute tasks as subagents (requires pi-chonky-subagents)
  *
  * Commands:
  *   /tasks       — Interactive task management menu
@@ -18,6 +19,7 @@ import { Type } from "@sinclair/typebox";
 import { TaskStore } from "./task-store.js";
 import { ProcessTracker } from "./process-tracker.js";
 import { TaskWidget, type UICtx } from "./ui/task-widget.js";
+import type { SubagentBridge } from "./types.js";
 
 // ---- Helpers ----
 
@@ -26,7 +28,7 @@ function textResult(msg: string) {
 }
 
 /** Task tool names — used to detect task tool usage for reminder suppression. */
-const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "TaskOutput", "TaskStop"]);
+const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "TaskOutput", "TaskStop", "TaskExecute"]);
 
 /** How many turns without task tool usage before injecting a reminder. */
 const REMINDER_INTERVAL = 4;
@@ -41,6 +43,79 @@ export default function (pi: ExtensionAPI) {
   const store = new TaskStore(listId);
   const tracker = new ProcessTracker();
   const widget = new TaskWidget(store);
+
+  // ── Subagent integration state ──
+  let autoCascadeEnabled = false;
+  /** Latest ExtensionContext — refreshed on every tool execution so cascade always has a valid one. */
+  let latestCtx: ExtensionContext | undefined;
+  /** Cascade config — set by TaskExecute, consumed by completion listener. */
+  let cascadeConfig: { additionalContext?: string; model?: string; maxTurns?: number } | undefined;
+
+  /** Get the subagent bridge from the global registry (returns undefined if pi-chonky-subagents not loaded). */
+  function getSubagentBridge(): SubagentBridge | undefined {
+    const key = Symbol.for("pi-subagents:manager");
+    return (globalThis as any)[key] as SubagentBridge | undefined;
+  }
+
+  /** Build a prompt for a task being executed by a subagent. */
+  function buildTaskPrompt(task: { id: string; subject: string; description: string }, additionalContext?: string): string {
+    let prompt = `You are executing task #${task.id}: "${task.subject}"\n\n${task.description}`;
+    if (additionalContext) prompt += `\n\n${additionalContext}`;
+    prompt += `\n\nComplete this task fully. Do not attempt to manage tasks yourself.`;
+    return prompt;
+  }
+
+  // ── Subagent completion listener ──
+  // Listens for subagent lifecycle events to update task status and optionally cascade.
+
+  // Success → mark task completed, cascade if enabled
+  pi.events.on("subagents:completed", (data) => {
+    const { id } = data as { id: string };
+    const task = store.list().find(t => t.metadata?.agentId === id);
+    if (!task) return;
+
+    store.update(task.id, { status: "completed" });
+    widget.setActiveTask(task.id, false);
+
+    // Auto-cascade: find unblocked dependents with agentType
+    if (autoCascadeEnabled && cascadeConfig && latestCtx) {
+      const bridge = getSubagentBridge();
+      if (bridge) {
+        const unblocked = store.list().filter(t =>
+          t.status === "pending" &&
+          t.metadata?.agentType &&
+          t.blockedBy.includes(task.id) &&
+          t.blockedBy.every(depId => store.get(depId)?.status === "completed")
+        );
+        for (const next of unblocked) {
+          store.update(next.id, { status: "in_progress" });
+          const prompt = buildTaskPrompt(next, cascadeConfig.additionalContext);
+          const agentId = bridge.spawn(pi, latestCtx,
+            next.metadata.agentType, prompt, {
+              description: next.subject,
+              isBackground: true,
+              maxTurns: cascadeConfig.maxTurns,
+            });
+          store.update(next.id, { owner: agentId, metadata: { ...next.metadata, agentId } });
+          widget.setActiveTask(next.id);
+        }
+      }
+    }
+    widget.update();
+  });
+
+  // Failure → store error, revert to pending, don't cascade (branch stops)
+  pi.events.on("subagents:failed", (data) => {
+    const { id, error, status } = data as { id: string; error?: string; status: string };
+    const task = store.list().find(t => t.metadata?.agentId === id);
+    if (!task) return;
+    store.update(task.id, {
+      status: "pending",
+      metadata: { ...task.metadata, lastError: error || status },
+    });
+    widget.setActiveTask(task.id, false);
+    widget.update();
+  });
 
   // ── Turn tracking for system-reminder injection ──
   let currentTurn = 0;
@@ -107,6 +182,16 @@ export default function (pi: ExtensionAPI) {
           line += ` [blocked by ${openBlockers.map(id => "#" + id).join(", ")}]`;
         }
       }
+      // Mark agent-typed pending tasks with all deps completed as READY
+      if (t.status === "pending" && t.metadata?.agentType) {
+        const allDepsCompleted = t.blockedBy.length === 0 || t.blockedBy.every(bid => {
+          const blocker = store.get(bid);
+          return blocker && blocker.status === "completed";
+        });
+        if (allDepsCompleted) {
+          line += ` [READY — use TaskExecute to start]`;
+        }
+      }
       return line;
     }).join("\n");
 
@@ -115,8 +200,9 @@ export default function (pi: ExtensionAPI) {
     };
   });
 
-  // Grab UI context from first tool execution
+  // Grab UI + extension context from every tool execution
   pi.on("tool_execution_start", async (_event, ctx) => {
+    latestCtx = ctx;
     widget.setUICtx(ctx.ui as UICtx);
     widget.update();
   });
@@ -167,7 +253,8 @@ All tasks are created with status \`pending\`.
 - Create tasks with clear, specific subjects that describe the outcome
 - Include enough detail in the description for another agent to understand and complete the task
 - After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed
-- Check TaskList first to avoid creating duplicate tasks`,
+- Check TaskList first to avoid creating duplicate tasks
+- Include \`agentType\` (e.g., "general-purpose", "Explore") to mark tasks for subagent execution via TaskExecute`,
     promptGuidelines: [
       "When working on complex multi-step tasks, use TaskCreate to track progress and TaskUpdate to update status.",
       "Mark tasks as in_progress before starting work and completed when done.",
@@ -177,11 +264,14 @@ All tasks are created with status \`pending\`.
       subject: Type.String({ description: "A brief title for the task" }),
       description: Type.String({ description: "A detailed description of what needs to be done" }),
       activeForm: Type.Optional(Type.String({ description: "Present continuous form shown in spinner when in_progress (e.g., 'Running tests')" })),
+      agentType: Type.Optional(Type.String({ description: "Agent type for subagent execution (e.g., 'general-purpose', 'Explore'). Tasks with agentType can be started via TaskExecute." })),
       metadata: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Arbitrary metadata to attach to the task" })),
     }),
 
     execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      const task = store.create(params.subject, params.description, params.activeForm, params.metadata);
+      const meta = params.metadata ?? {};
+      if (params.agentType) meta.agentType = params.agentType;
+      const task = store.create(params.subject, params.description, params.activeForm, Object.keys(meta).length > 0 ? meta : undefined);
       widget.update();
       return Promise.resolve(textResult(`Task #${task.id} created successfully: ${task.subject}`));
     },
@@ -512,6 +602,103 @@ Set up task dependencies:
   });
 
   // ──────────────────────────────────────────────────
+  // Tool 7: TaskExecute
+  // ──────────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "TaskExecute",
+    label: "TaskExecute",
+    description: `Execute one or more tasks as subagents. Requires pi-chonky-subagents extension.
+
+## When to Use This Tool
+
+- To start execution of tasks that have \`agentType\` set (created via TaskCreate with agentType parameter)
+- Tasks must be \`pending\` with all blockedBy dependencies \`completed\`
+- Each task runs as an independent background subagent
+
+## Parameters
+
+- **task_ids**: Array of task IDs to execute
+- **additional_context**: Extra context appended to each agent's prompt
+- **model**: Model override for agents (e.g., "sonnet", "haiku")
+- **max_turns**: Maximum turns per agent`,
+    parameters: Type.Object({
+      task_ids: Type.Array(Type.String(), { description: "Task IDs to execute as subagents" }),
+      additional_context: Type.Optional(Type.String({ description: "Extra context for agent prompts" })),
+      model: Type.Optional(Type.String({ description: "Model override for agents" })),
+      max_turns: Type.Optional(Type.Number({ description: "Max turns per agent", minimum: 1 })),
+    }),
+
+    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const bridge = getSubagentBridge();
+      if (!bridge) {
+        return Promise.resolve(textResult(
+          "TaskExecute requires the pi-chonky-subagents extension to be loaded. " +
+          "Install and enable it, then try again."
+        ));
+      }
+
+      const results: string[] = [];
+      const launched: string[] = [];
+
+      for (const taskId of params.task_ids) {
+        const task = store.get(taskId);
+        if (!task) {
+          results.push(`#${taskId}: not found`);
+          continue;
+        }
+        if (task.status !== "pending") {
+          results.push(`#${taskId}: not pending (status: ${task.status})`);
+          continue;
+        }
+        if (!task.metadata?.agentType) {
+          results.push(`#${taskId}: no agentType set — create with agentType parameter or update metadata`);
+          continue;
+        }
+
+        // Check all blockers are completed
+        const openBlockers = task.blockedBy.filter(bid => {
+          const blocker = store.get(bid);
+          return !blocker || blocker.status !== "completed";
+        });
+        if (openBlockers.length > 0) {
+          results.push(`#${taskId}: blocked by ${openBlockers.map(id => "#" + id).join(", ")}`);
+          continue;
+        }
+
+        // Mark in_progress and spawn agent
+        store.update(taskId, { status: "in_progress" });
+        const prompt = buildTaskPrompt(task, params.additional_context);
+        const agentId = bridge.spawn(pi, ctx, task.metadata.agentType, prompt, {
+          description: task.subject,
+          isBackground: true,
+          maxTurns: params.max_turns,
+        });
+
+        store.update(taskId, { owner: agentId, metadata: { ...task.metadata, agentId } });
+        widget.setActiveTask(taskId);
+        launched.push(`#${taskId} → agent ${agentId}`);
+      }
+
+      // Save cascade config for the completion listener
+      cascadeConfig = {
+        additionalContext: params.additional_context,
+        model: params.model,
+        maxTurns: params.max_turns,
+      };
+
+      widget.update();
+
+      const lines: string[] = [];
+      if (launched.length > 0) lines.push(`Launched ${launched.length} agent(s):\n${launched.join("\n")}`);
+      if (results.length > 0) lines.push(`Skipped:\n${results.join("\n")}`);
+      if (lines.length === 0) lines.push("No tasks to execute.");
+
+      return Promise.resolve(textResult(lines.join("\n\n")));
+    },
+  });
+
+  // ──────────────────────────────────────────────────
   // /tasks command
   // ──────────────────────────────────────────────────
 
@@ -528,6 +715,7 @@ Set up task dependencies:
         const choices: string[] = [
           `View all tasks (${taskCount})`,
           "Create task",
+          "Settings",
         ];
         if (completedCount > 0) choices.push(`Clear completed (${completedCount})`);
 
@@ -538,6 +726,8 @@ Set up task dependencies:
           await viewTasks();
         } else if (choice === "Create task") {
           await createTask();
+        } else if (choice === "Settings") {
+          await settingsMenu();
         } else if (choice.startsWith("Clear")) {
           store.clearCompleted();
           widget.update();
@@ -609,6 +799,18 @@ Set up task dependencies:
           return viewTasks();
         }
         return viewTasks();
+      };
+
+      const settingsMenu = async (): Promise<void> => {
+        const cascadeLabel = `Auto-execute tasks with agents: ${autoCascadeEnabled ? "ON" : "OFF"}`;
+        const choices = [cascadeLabel, "← Back"];
+        const selected = await ui.select("Settings", choices);
+        if (!selected || selected === "← Back") return mainMenu();
+        if (selected === cascadeLabel) {
+          autoCascadeEnabled = !autoCascadeEnabled;
+          return settingsMenu();
+        }
+        return mainMenu();
       };
 
       const createTask = async (): Promise<void> => {
