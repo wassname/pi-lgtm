@@ -8,7 +8,7 @@
  *   TaskUpdate   — Update task fields, status, dependencies
  *   TaskOutput   — Get output from a background task process
  *   TaskStop     — Stop a running background task process
- *   TaskExecute  — Execute tasks as subagents (requires pi-chonky-subagents)
+ *   TaskExecute  — Execute tasks as subagents (requires @tintinweb/pi-subagents)
  *
  * Commands:
  *   /tasks       — Interactive task management menu
@@ -19,7 +19,7 @@ import { Type } from "@sinclair/typebox";
 import { TaskStore } from "./task-store.js";
 import { ProcessTracker } from "./process-tracker.js";
 import { TaskWidget, type UICtx } from "./ui/task-widget.js";
-import type { SubagentBridge } from "./types.js";
+import { randomUUID } from "node:crypto";
 
 // ---- Helpers ----
 
@@ -50,11 +50,41 @@ export default function (pi: ExtensionAPI) {
   let latestCtx: ExtensionContext | undefined;
   /** Cascade config — set by TaskExecute, consumed by completion listener. */
   let cascadeConfig: { additionalContext?: string; model?: string; maxTurns?: number } | undefined;
+  /** Maps agent IDs to task IDs for O(1) completion lookup. */
+  const agentTaskMap = new Map<string, string>();
 
-  /** Get the subagent bridge from the global registry (returns undefined if pi-chonky-subagents not loaded). */
-  function getSubagentBridge(): SubagentBridge | undefined {
-    const key = Symbol.for("pi-subagents:manager");
-    return (globalThis as any)[key] as SubagentBridge | undefined;
+  // ── Subagent extension presence detection ──
+  // Two paths: (1) listen for ready broadcast (subagents loads first),
+  //            (2) send ping on our init (tasks loads first).
+  let subagentsAvailable = false;
+
+  // Ping subagents extension — scoped reply channel, no filtering needed
+  const pingId = randomUUID();
+  const unsubPing = pi.events.on(`subagents:rpc:ping:reply:${pingId}`, () => {
+    subagentsAvailable = true;
+    unsubPing();
+  });
+  pi.events.emit("subagents:rpc:ping", { requestId: pingId });
+
+  // Also listen for ready broadcast (covers: subagents loads after us)
+  pi.events.on("subagents:ready", () => {
+    subagentsAvailable = true;
+    unsubPing();   // clean up ping listener if still pending
+  });
+
+  /** Spawn a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension). */
+  function spawnSubagent(type: string, prompt: string, options?: any): Promise<string> {
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { unsub(); reject(new Error("subagents:rpc:spawn timeout")); }, 30000);
+      const unsub = pi.events.on(`subagents:rpc:spawn:reply:${requestId}`, (p: unknown) => {
+        const { id, error } = p as { id?: string; error?: string };
+        unsub(); clearTimeout(timer);
+        if (error) reject(new Error(error));
+        else resolve(id!);
+      });
+      pi.events.emit("subagents:rpc:spawn", { requestId, type, prompt, options });
+    });
   }
 
   /** Build a prompt for a task being executed by a subagent. */
@@ -69,35 +99,39 @@ export default function (pi: ExtensionAPI) {
   // Listens for subagent lifecycle events to update task status and optionally cascade.
 
   // Success → mark task completed, cascade if enabled
-  pi.events.on("subagents:completed", (data) => {
-    const { id } = data as { id: string };
-    const task = store.list().find(t => t.metadata?.agentId === id);
+  pi.events.on("subagents:completed", async (data) => {
+    const { id, result } = data as { id: string; result?: string };
+    const taskId = agentTaskMap.get(id);
+    if (!taskId) return;
+    agentTaskMap.delete(id);
+    const task = store.get(taskId);
     if (!task) return;
 
-    store.update(task.id, { status: "completed" });
+    store.update(task.id, { status: "completed", metadata: { ...task.metadata, result } });
     widget.setActiveTask(task.id, false);
 
     // Auto-cascade: find unblocked dependents with agentType
     if (autoCascadeEnabled && cascadeConfig && latestCtx) {
-      const bridge = getSubagentBridge();
-      if (bridge) {
-        const unblocked = store.list().filter(t =>
-          t.status === "pending" &&
-          t.metadata?.agentType &&
-          t.blockedBy.includes(task.id) &&
-          t.blockedBy.every(depId => store.get(depId)?.status === "completed")
-        );
-        for (const next of unblocked) {
-          store.update(next.id, { status: "in_progress" });
-          const prompt = buildTaskPrompt(next, cascadeConfig.additionalContext);
-          const agentId = bridge.spawn(pi, latestCtx,
-            next.metadata.agentType, prompt, {
-              description: next.subject,
-              isBackground: true,
-              maxTurns: cascadeConfig.maxTurns,
-            });
+      const unblocked = store.list().filter(t =>
+        t.status === "pending" &&
+        t.metadata?.agentType &&
+        t.blockedBy.includes(task.id) &&
+        t.blockedBy.every(depId => store.get(depId)?.status === "completed")
+      );
+      for (const next of unblocked) {
+        store.update(next.id, { status: "in_progress" });
+        const prompt = buildTaskPrompt(next, cascadeConfig.additionalContext);
+        try {
+          const agentId = await spawnSubagent(next.metadata.agentType, prompt, {
+            description: next.subject,
+            isBackground: true,
+            maxTurns: cascadeConfig.maxTurns,
+          });
+          agentTaskMap.set(agentId, next.id);
           store.update(next.id, { owner: agentId, metadata: { ...next.metadata, agentId } });
           widget.setActiveTask(next.id);
+        } catch (err: any) {
+          store.update(next.id, { status: "pending", metadata: { ...next.metadata, lastError: err.message } });
         }
       }
     }
@@ -107,7 +141,10 @@ export default function (pi: ExtensionAPI) {
   // Failure → store error, revert to pending, don't cascade (branch stops)
   pi.events.on("subagents:failed", (data) => {
     const { id, error, status } = data as { id: string; error?: string; status: string };
-    const task = store.list().find(t => t.metadata?.agentId === id);
+    const taskId = agentTaskMap.get(id);
+    if (!taskId) return;
+    agentTaskMap.delete(id);
+    const task = store.get(taskId);
     if (!task) return;
     store.update(task.id, {
       status: "pending",
@@ -608,7 +645,7 @@ Set up task dependencies:
   pi.registerTool({
     name: "TaskExecute",
     label: "TaskExecute",
-    description: `Execute one or more tasks as subagents. Requires pi-chonky-subagents extension.
+    description: `Execute one or more tasks as subagents. Requires @tintinweb/pi-subagents extension.
 
 ## When to Use This Tool
 
@@ -629,13 +666,12 @@ Set up task dependencies:
       max_turns: Type.Optional(Type.Number({ description: "Max turns per agent", minimum: 1 })),
     }),
 
-    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const bridge = getSubagentBridge();
-      if (!bridge) {
-        return Promise.resolve(textResult(
-          "TaskExecute requires the pi-chonky-subagents extension to be loaded. " +
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      if (!subagentsAvailable) {
+        return textResult(
+          "TaskExecute requires the @tintinweb/pi-subagents extension to be loaded. " +
           "Install and enable it, then try again."
-        ));
+        );
       }
 
       const results: string[] = [];
@@ -666,18 +702,23 @@ Set up task dependencies:
           continue;
         }
 
-        // Mark in_progress and spawn agent
+        // Mark in_progress and spawn agent via RPC
         store.update(taskId, { status: "in_progress" });
         const prompt = buildTaskPrompt(task, params.additional_context);
-        const agentId = bridge.spawn(pi, ctx, task.metadata.agentType, prompt, {
-          description: task.subject,
-          isBackground: true,
-          maxTurns: params.max_turns,
-        });
-
-        store.update(taskId, { owner: agentId, metadata: { ...task.metadata, agentId } });
-        widget.setActiveTask(taskId);
-        launched.push(`#${taskId} → agent ${agentId}`);
+        try {
+          const agentId = await spawnSubagent(task.metadata.agentType, prompt, {
+            description: task.subject,
+            isBackground: true,
+            maxTurns: params.max_turns,
+          });
+          agentTaskMap.set(agentId, taskId);
+          store.update(taskId, { owner: agentId, metadata: { ...task.metadata, agentId } });
+          widget.setActiveTask(taskId);
+          launched.push(`#${taskId} → agent ${agentId}`);
+        } catch (err: any) {
+          store.update(taskId, { status: "pending" });
+          results.push(`#${taskId}: spawn failed — ${err.message}`);
+        }
       }
 
       // Save cascade config for the completion listener
@@ -694,7 +735,7 @@ Set up task dependencies:
       if (results.length > 0) lines.push(`Skipped:\n${results.join("\n")}`);
       if (lines.length === 0) lines.push("No tasks to execute.");
 
-      return Promise.resolve(textResult(lines.join("\n\n")));
+      return textResult(lines.join("\n\n"));
     },
   });
 

@@ -21,7 +21,7 @@ https://github.com/user-attachments/assets/86b09bd1-6882-4b0c-be20-ea866dd44b6a
 - **Shared task lists** — multiple pi sessions can share a file-backed task list for agent team coordination
 - **File locking** — concurrent access is safe when multiple sessions share a task list
 - **Background process tracking** — track spawned processes with output buffering, blocking wait, and graceful stop
-- **Subagent integration** — tasks with `agentType` can be executed as subagents via `TaskExecute` (requires [pi-chonky-subagents](https://github.com/tintinweb/pi-subagents)). Auto-cascade mode flows through the task DAG automatically when enabled.
+- **Subagent integration** — tasks with `agentType` can be executed as subagents via `TaskExecute` (requires [@tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents)). Auto-cascade mode flows through the task DAG automatically when enabled.
 
 ## Install
 
@@ -147,7 +147,7 @@ Stop a running background task process. Sends SIGTERM, waits 5 seconds, then SIG
 
 ### `TaskExecute`
 
-Execute one or more tasks as background subagents. Requires [pi-chonky-subagents](https://github.com/tintinweb/pi-subagents).
+Execute one or more tasks as background subagents. Requires [@tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -205,6 +205,56 @@ Tasks
 - **Create task** — input prompts for subject and description
 - **Settings** — toggle auto-cascade (auto-execute unblocked agent tasks on completion)
 - **Clear completed** — remove all completed tasks
+
+## Cross-extension Communication with [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents)
+
+[`pi-tasks`](https://github.com/tintinweb/pi-tasks) communicates with [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) via pi's eventbus using a scoped request/reply RPC protocol. No shared global state — just events.
+
+### Presence Detection
+
+Load order doesn't matter. Two handshake paths ensure detection regardless of which extension loads first:
+
+1. **Ping on init** — [`pi-tasks`](https://github.com/tintinweb/pi-tasks) emits `subagents:rpc:ping` with a unique `requestId` and listens for `subagents:rpc:ping:reply:{requestId}`. If [`pi-subagents`](https://github.com/tintinweb/pi-subagents) is already loaded, it replies immediately.
+2. **Ready broadcast** — [`pi-subagents`](https://github.com/tintinweb/pi-subagents) emits `subagents:ready` when it initializes. If [`pi-tasks`](https://github.com/tintinweb/pi-tasks) loaded first, it picks this up.
+
+```
+┌─────────────┐                    ┌──────────────────┐
+│  pi-tasks   │                    │  pi-subagents    │
+└──────┬──────┘                    └────────┬─────────┘
+       │                                    │
+       │──── subagents:rpc:ping ───────────▶│
+       │◀─── subagents:rpc:ping:reply ──────│
+       │                                    │
+       │◀─── subagents:ready ───────────────│  (broadcast on init)
+       │                                    │
+```
+
+### Spawning Subagents
+
+When `TaskExecute` runs, it sends a spawn RPC with a scoped reply channel:
+
+```
+pi-tasks                                pi-subagents
+   │                                         │
+   │── subagents:rpc:spawn ─────────────────▶│  { requestId, type, prompt, options }
+   │◀─ subagents:rpc:spawn:reply:{reqId} ───│  { id }  (or { error })
+   │                                         │
+```
+
+The returned `id` is stored in an in-memory `agentTaskMap` (agentId → taskId) for O(1) completion lookup. A 30-second timeout rejects the Promise if no reply arrives.
+
+### Lifecycle Events
+
+[`pi-subagents`](https://github.com/tintinweb/pi-subagents) emits lifecycle events that [`pi-tasks`](https://github.com/tintinweb/pi-tasks) listens to:
+
+| Event | Payload | Action |
+|-------|---------|--------|
+| `subagents:completed` | `{ id, result? }` | Mark task `completed`, trigger auto-cascade if enabled |
+| `subagents:failed` | `{ id, error?, status }` | Revert task to `pending`, store error in metadata |
+
+### Standalone Mode
+
+If [`pi-subagents`](https://github.com/tintinweb/pi-subagents) is not installed, everything works except `TaskExecute`, which returns a friendly error message. All core task tools (create, list, get, update, dependencies, widget, system-reminder injection) function independently.
 
 ## Architecture
 

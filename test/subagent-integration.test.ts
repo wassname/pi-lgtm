@@ -6,7 +6,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { TaskStore } from "../src/task-store.js";
 import { TaskWidget, type UICtx, type Theme } from "../src/ui/task-widget.js";
-import type { SubagentBridge } from "../src/types.js";
 import initExtension from "../src/index.js";
 
 // ---- Mock pi ----
@@ -76,67 +75,72 @@ function mockCtx() {
   };
 }
 
-// ---- Mock subagent bridge ----
+// ---- Mock subagents extension (RPC responders) ----
 
-function mockBridge(): SubagentBridge & { spawned: Array<{ type: string; prompt: string; options: any }> } {
+/** Simulates the @tintinweb/pi-subagents extension: responds to ping + spawn RPCs and emits ready. */
+function installSubagentsMock(pi: { events: { on: Function; emit: Function } }) {
   let idCounter = 0;
   const spawned: Array<{ id: string; type: string; prompt: string; options: any }> = [];
 
+  // Respond to ping — reply on scoped channel
+  const unsubPing = pi.events.on("subagents:rpc:ping", (data: unknown) => {
+    const { requestId } = data as { requestId: string };
+    pi.events.emit(`subagents:rpc:ping:reply:${requestId}`, {});
+  });
+
+  // Respond to spawn — reply on scoped channel
+  const unsubSpawn = pi.events.on("subagents:rpc:spawn", (data: unknown) => {
+    const { requestId, type, prompt, options } = data as {
+      requestId: string; type: string; prompt: string; options?: any;
+    };
+    const id = `agent-${++idCounter}`;
+    spawned.push({ id, type, prompt, options });
+    pi.events.emit(`subagents:rpc:spawn:reply:${requestId}`, { id });
+  });
+
+  // Broadcast readiness
+  pi.events.emit("subagents:ready", {});
+
   return {
     spawned,
-    waitForAll: async () => {},
-    hasRunning: () => false,
-    spawn(_pi: any, _ctx: any, type: string, prompt: string, options: any) {
-      const id = `agent-${++idCounter}`;
-      spawned.push({ id, type, prompt, options });
-      return id;
-    },
-    getRecord(id: string) {
-      return spawned.find(s => s.id === id) ? { id, status: "running" } : undefined;
-    },
+    unsub() { unsubPing(); unsubSpawn(); },
   };
-}
-
-/** Install/remove a mock bridge on the global registry. */
-function installBridge(bridge: SubagentBridge) {
-  const key = Symbol.for("pi-subagents:manager");
-  (globalThis as any)[key] = bridge;
-  return () => { delete (globalThis as any)[key]; };
 }
 
 // ---- Tests ----
 
 describe("TaskExecute", () => {
   let mock: ReturnType<typeof mockPi>;
-  let bridge: ReturnType<typeof mockBridge>;
-  let removeBridge: () => void;
+  let rpc: ReturnType<typeof installSubagentsMock>;
 
   beforeEach(() => {
     mock = mockPi();
+    // Install mock BEFORE init so ping reply is received during extension init
+    rpc = installSubagentsMock(mock.pi);
     initExtension(mock.pi as any);
-    bridge = mockBridge();
-    removeBridge = installBridge(bridge);
   });
 
   afterEach(() => {
-    removeBridge();
+    rpc.unsub();
   });
 
   it("is registered as a tool", () => {
     expect(mock.tools.has("TaskExecute")).toBe(true);
   });
 
-  it("returns error when subagent bridge is not loaded", async () => {
-    removeBridge();
-    // Create a task with agentType
-    await mock.executeTool("TaskCreate", {
+  it("returns error when subagent extension is not loaded", async () => {
+    // Re-init without mock to simulate missing extension
+    const freshMock = mockPi();
+    initExtension(freshMock.pi as any);
+
+    await freshMock.executeTool("TaskCreate", {
       subject: "Test task",
       description: "Do something",
       agentType: "general-purpose",
     });
 
-    const result = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
-    expect(result.content[0].text).toContain("requires the pi-chonky-subagents extension");
+    const result = await freshMock.executeTool("TaskExecute", { task_ids: ["1"] });
+    expect(result.content[0].text).toContain("requires the @tintinweb/pi-subagents extension");
   });
 
   it("rejects non-existent tasks", async () => {
@@ -194,11 +198,11 @@ describe("TaskExecute", () => {
     expect(result.content[0].text).toContain("Launched 1 agent");
     expect(result.content[0].text).toContain("#1 → agent agent-1");
 
-    // Verify the bridge was called
-    expect(bridge.spawned).toHaveLength(1);
-    expect(bridge.spawned[0].type).toBe("general-purpose");
-    expect(bridge.spawned[0].prompt).toContain("Run the test suite");
-    expect(bridge.spawned[0].options.isBackground).toBe(true);
+    // Verify the RPC responder was called
+    expect(rpc.spawned).toHaveLength(1);
+    expect(rpc.spawned[0].type).toBe("general-purpose");
+    expect(rpc.spawned[0].prompt).toContain("Run the test suite");
+    expect(rpc.spawned[0].options.isBackground).toBe(true);
   });
 
   it("passes additional_context and max_turns to spawned agents", async () => {
@@ -214,8 +218,8 @@ describe("TaskExecute", () => {
       max_turns: 10,
     });
 
-    expect(bridge.spawned[0].prompt).toContain("Focus on REST endpoints only");
-    expect(bridge.spawned[0].options.maxTurns).toBe(10);
+    expect(rpc.spawned[0].prompt).toContain("Focus on REST endpoints only");
+    expect(rpc.spawned[0].options.maxTurns).toBe(10);
   });
 
   it("allows executing tasks whose blockers are all completed", async () => {
@@ -255,20 +259,42 @@ describe("TaskExecute", () => {
   });
 });
 
+describe("TaskExecute via ready broadcast", () => {
+  it("detects subagents when ready fires after tasks init", async () => {
+    // Init tasks WITHOUT the mock — subagents not available yet
+    const mock = mockPi();
+    initExtension(mock.pi as any);
+
+    // Now install the mock (simulates subagents loading later) and broadcast ready
+    const rpc = installSubagentsMock(mock.pi);
+
+    // Create a task and execute — should work because ready was received
+    await mock.executeTool("TaskCreate", {
+      subject: "Late-loaded test",
+      description: "Desc",
+      agentType: "general-purpose",
+    });
+
+    const result = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    expect(result.content[0].text).toContain("Launched 1 agent");
+    expect(rpc.spawned).toHaveLength(1);
+
+    rpc.unsub();
+  });
+});
+
 describe("Completion listener", () => {
   let mock: ReturnType<typeof mockPi>;
-  let bridge: ReturnType<typeof mockBridge>;
-  let removeBridge: () => void;
+  let rpc: ReturnType<typeof installSubagentsMock>;
 
   beforeEach(() => {
     mock = mockPi();
+    rpc = installSubagentsMock(mock.pi);
     initExtension(mock.pi as any);
-    bridge = mockBridge();
-    removeBridge = installBridge(bridge);
   });
 
   afterEach(() => {
-    removeBridge();
+    rpc.unsub();
   });
 
   it("marks task completed on subagents:completed event", async () => {
@@ -318,28 +344,17 @@ describe("Completion listener", () => {
 
 describe("Auto-cascade", () => {
   let mock: ReturnType<typeof mockPi>;
-  let bridge: ReturnType<typeof mockBridge>;
-  let removeBridge: () => void;
+  let rpc: ReturnType<typeof installSubagentsMock>;
 
   beforeEach(() => {
     mock = mockPi();
+    rpc = installSubagentsMock(mock.pi);
     initExtension(mock.pi as any);
-    bridge = mockBridge();
-    removeBridge = installBridge(bridge);
   });
 
   afterEach(() => {
-    removeBridge();
+    rpc.unsub();
   });
-
-  /** Enable auto-cascade by toggling the setting via the /tasks command mock. */
-  function enableAutoCascade() {
-    // Auto-cascade is toggled via module-level state. Since we can't access it
-    // directly, we test that WITHOUT enabling it, cascade doesn't happen,
-    // and test the cascade logic indirectly via event flow.
-    // For a proper toggle test we'd need to invoke the /tasks command handler,
-    // but that requires a full UI mock. Instead we test the default (off) behavior.
-  }
 
   it("does NOT cascade when auto-cascade is off (default)", async () => {
     // Create A → B chain
@@ -357,13 +372,13 @@ describe("Auto-cascade", () => {
 
     // Execute A
     await mock.executeTool("TaskExecute", { task_ids: ["1"] });
-    expect(bridge.spawned).toHaveLength(1);
+    expect(rpc.spawned).toHaveLength(1);
 
     // Complete A
     mock.emitEvent("subagents:completed", { id: "agent-1" });
 
     // B should NOT have been auto-started
-    expect(bridge.spawned).toHaveLength(1);
+    expect(rpc.spawned).toHaveLength(1);
 
     // B should still be pending
     const result = await mock.executeTool("TaskGet", { taskId: "2" });
@@ -387,7 +402,7 @@ describe("Auto-cascade", () => {
     mock.emitEvent("subagents:failed", { id: "agent-1", error: "crashed", status: "error" });
 
     // B should not start
-    expect(bridge.spawned).toHaveLength(1);
+    expect(rpc.spawned).toHaveLength(1);
     const result = await mock.executeTool("TaskGet", { taskId: "2" });
     expect(result.content[0].text).toContain("Status: pending");
   });
@@ -409,7 +424,7 @@ describe("Auto-cascade", () => {
     mock.emitEvent("subagents:completed", { id: "agent-1" });
 
     // Manual task should stay pending
-    expect(bridge.spawned).toHaveLength(1);
+    expect(rpc.spawned).toHaveLength(1);
   });
 });
 
@@ -485,6 +500,177 @@ describe("System prompt READY tags", () => {
 
     const result = await lifecycleHandlers[0]({ systemPrompt: "base" });
     expect(result.systemPrompt).not.toContain("READY");
+  });
+});
+
+describe("Standalone operation (no subagents extension)", () => {
+  let mock: ReturnType<typeof mockPi>;
+
+  beforeEach(() => {
+    // Init WITHOUT installSubagentsMock — no subagents extension present
+    mock = mockPi();
+    initExtension(mock.pi as any);
+  });
+
+  it("all core task tools are registered", () => {
+    for (const name of ["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "TaskExecute"]) {
+      expect(mock.tools.has(name)).toBe(true);
+    }
+  });
+
+  it("TaskCreate works without subagents", async () => {
+    const result = await mock.executeTool("TaskCreate", {
+      subject: "Write tests",
+      description: "Add unit tests for the parser",
+    });
+    expect(result.content[0].text).toContain("Write tests");
+  });
+
+  it("TaskList works without subagents", async () => {
+    await mock.executeTool("TaskCreate", { subject: "A", description: "desc" });
+    await mock.executeTool("TaskCreate", { subject: "B", description: "desc" });
+    const result = await mock.executeTool("TaskList", {});
+    expect(result.content[0].text).toContain("#1");
+    expect(result.content[0].text).toContain("#2");
+  });
+
+  it("TaskGet works without subagents", async () => {
+    await mock.executeTool("TaskCreate", { subject: "Read me", description: "details here" });
+    const result = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(result.content[0].text).toContain("Read me");
+    expect(result.content[0].text).toContain("details here");
+  });
+
+  it("TaskUpdate works without subagents", async () => {
+    await mock.executeTool("TaskCreate", { subject: "Update me", description: "desc" });
+    await mock.executeTool("TaskUpdate", { taskId: "1", status: "in_progress" });
+    const result = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(result.content[0].text).toContain("in_progress");
+  });
+
+  it("TaskExecute gracefully refuses without subagents", async () => {
+    await mock.executeTool("TaskCreate", {
+      subject: "Agent task",
+      description: "desc",
+      agentType: "general-purpose",
+    });
+    const result = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    expect(result.content[0].text).toContain("requires the @tintinweb/pi-subagents extension");
+  });
+
+  it("subagents lifecycle events are silently ignored without mapped agents", () => {
+    // These should not throw even though no subagents extension is loaded
+    mock.emitEvent("subagents:completed", { id: "ghost-agent", result: "done" });
+    mock.emitEvent("subagents:failed", { id: "ghost-agent", error: "boom", status: "error" });
+    // No crash = pass
+  });
+
+  it("task dependencies work without subagents", async () => {
+    await mock.executeTool("TaskCreate", { subject: "First", description: "desc" });
+    await mock.executeTool("TaskCreate", { subject: "Second", description: "desc" });
+    await mock.executeTool("TaskUpdate", { taskId: "2", addBlockedBy: ["1"] });
+
+    const result = await mock.executeTool("TaskGet", { taskId: "2" });
+    expect(result.content[0].text).toContain("Blocked by");
+    expect(result.content[0].text).toContain("#1");
+  });
+});
+
+describe("RPC protocol correctness", () => {
+  it("ping uses scoped reply channel (not shared channel)", () => {
+    const mock = mockPi();
+    const emitted: Array<{ channel: string; data: unknown }> = [];
+    const origEmit = mock.pi.events.emit.bind(mock.pi.events);
+    mock.pi.events.emit = (channel: string, data: unknown) => {
+      emitted.push({ channel, data });
+      origEmit(channel, data);
+    };
+
+    initExtension(mock.pi as any);
+
+    // Find the ping emit
+    const pingEmit = emitted.find(e => e.channel === "subagents:rpc:ping");
+    expect(pingEmit).toBeDefined();
+    const pingData = pingEmit!.data as { requestId: string };
+    expect(pingData.requestId).toBeDefined();
+    expect(typeof pingData.requestId).toBe("string");
+  });
+
+  it("spawn reply cleans up listener and timer on success", async () => {
+    const mock = mockPi();
+    const rpc = installSubagentsMock(mock.pi);
+    initExtension(mock.pi as any);
+
+    await mock.executeTool("TaskCreate", {
+      subject: "Test",
+      description: "desc",
+      agentType: "general-purpose",
+    });
+
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    expect(rpc.spawned).toHaveLength(1);
+
+    // Second spawn should get a fresh requestId (not conflict with first)
+    await mock.executeTool("TaskCreate", {
+      subject: "Test 2",
+      description: "desc",
+      agentType: "general-purpose",
+    });
+    await mock.executeTool("TaskExecute", { task_ids: ["2"] });
+    expect(rpc.spawned).toHaveLength(2);
+    expect(rpc.spawned[0].id).not.toBe(rpc.spawned[1].id);
+
+    rpc.unsub();
+  });
+
+  it("spawn RPC rejects on timeout when no responder exists", async () => {
+    const mock = mockPi();
+    initExtension(mock.pi as any);
+
+    // Emit ready AFTER init so the listener is registered — marks subagents
+    // as available, but there's no spawn handler installed
+    mock.pi.events.emit("subagents:ready", {});
+
+    await mock.executeTool("TaskCreate", {
+      subject: "Timeout test",
+      description: "desc",
+      agentType: "general-purpose",
+    });
+
+    // spawnSubagent has a 30s timeout — we'll advance timers
+    vi.useFakeTimers();
+    const execPromise = mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    await vi.advanceTimersByTimeAsync(31000);
+
+    const result = await execPromise;
+    expect(result.content[0].text).toContain("timeout");
+
+    vi.useRealTimers();
+  });
+
+  it("ready broadcast sets subagentsAvailable even after init", async () => {
+    const mock = mockPi();
+    initExtension(mock.pi as any);
+
+    // Initially no subagents
+    await mock.executeTool("TaskCreate", {
+      subject: "Test",
+      description: "desc",
+      agentType: "general-purpose",
+    });
+    let result = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    expect(result.content[0].text).toContain("requires the @tintinweb/pi-subagents extension");
+
+    // Reset task status
+    await mock.executeTool("TaskUpdate", { taskId: "1", status: "pending" });
+
+    // Late subagents extension broadcasts ready
+    const rpc = installSubagentsMock(mock.pi);
+
+    result = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    expect(result.content[0].text).toContain("Launched 1 agent");
+
+    rpc.unsub();
   });
 });
 

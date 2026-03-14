@@ -24,14 +24,6 @@ export interface TaskStoreData {
   tasks: Task[];
 }
 
-/** Bridge to the pi-chonky-subagents extension via Symbol.for global registry. */
-export interface SubagentBridge {
-  waitForAll(): Promise<void>;
-  hasRunning(): boolean;
-  spawn(pi: any, ctx: any, type: string, prompt: string, options: any): string;
-  getRecord(id: string): any | undefined;
-}
-
 /** Background process associated with a task. */
 export interface BackgroundProcess {
   taskId: string;

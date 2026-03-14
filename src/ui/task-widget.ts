@@ -169,9 +169,9 @@ export class TaskWidget {
         if (isActive) {
           icon = theme.fg("accent", spinnerChar);
         } else if (task.status === "completed") {
-          icon = "✔";
+          icon = theme.fg("green", "✔");
         } else if (task.status === "in_progress") {
-          icon = "◼";
+          icon = theme.fg("accent", "◼");
         } else {
           icon = "◻";
         }
@@ -206,7 +206,7 @@ export class TaskWidget {
           }
           text = `  ${icon} ${theme.fg("accent", form + agentLabel + "…")}${stats}`;
         } else if (task.status === "completed") {
-          text = `  ${theme.fg("dim", icon)} ${theme.fg("dim", theme.strikethrough(task.subject))}`;
+          text = `  ${icon} ${theme.fg("dim", theme.strikethrough(task.subject))}`;
         } else {
           const agentSuffix = task.status === "in_progress" && task.metadata?.agentId
             ? theme.fg("dim", ` (agent ${task.metadata.agentId.slice(0, 5)})`)
