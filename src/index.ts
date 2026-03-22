@@ -14,15 +14,15 @@
  *   /tasks       — Interactive task management menu
  */
 
-import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
-import { TaskStore } from "./task-store.js";
-import { ProcessTracker } from "./process-tracker.js";
-import { TaskWidget, type UICtx } from "./ui/task-widget.js";
-import { loadTasksConfig } from "./tasks-config.js";
-import { openSettingsMenu } from "./ui/settings-menu.js";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
+import { ProcessTracker } from "./process-tracker.js";
+import { TaskStore } from "./task-store.js";
+import { loadTasksConfig } from "./tasks-config.js";
+import { openSettingsMenu } from "./ui/settings-menu.js";
+import { TaskWidget, type UICtx } from "./ui/task-widget.js";
 
 // ---- Debug ----
 

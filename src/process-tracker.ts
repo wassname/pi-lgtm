@@ -45,7 +45,7 @@ export class ProcessTracker {
     });
 
     // Handle process exit
-    proc.on("close", (code, signal) => {
+    proc.on("close", (code, _signal) => {
       if (bp.status === "running") {
         bp.status = code === 0 ? "completed" : "error";
       }

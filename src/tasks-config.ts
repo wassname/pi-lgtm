@@ -1,7 +1,7 @@
 // <cwd>/.pi/tasks-config.json — persists extension settings across sessions
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 export interface TasksConfig {
   taskScope?: "memory" | "session" | "project";  // default: "session"

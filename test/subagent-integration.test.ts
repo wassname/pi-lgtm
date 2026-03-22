@@ -3,10 +3,10 @@
  * auto-cascade, and widget agent ID display.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { TaskStore } from "../src/task-store.js";
-import { TaskWidget, type UICtx, type Theme } from "../src/ui/task-widget.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import initExtension from "../src/index.js";
+import { TaskStore } from "../src/task-store.js";
+import { TaskWidget, type Theme, type UICtx } from "../src/ui/task-widget.js";
 
 // Force in-memory task store for all integration tests — prevents file-backed
 // store from loading stale tasks across test instances.
@@ -14,6 +14,11 @@ beforeEach(() => { process.env.PI_TASKS = "off"; });
 afterEach(() => { delete process.env.PI_TASKS; });
 
 // ---- Mock pi ----
+
+type MockEventBus = {
+  on: (channel: string, handler: (data: unknown) => void) => () => void;
+  emit: (channel: string, data: unknown) => void;
+};
 
 /** Minimal mock of ExtensionAPI with events, tool capture, and event hooks. */
 function mockPi() {
@@ -84,7 +89,7 @@ function mockCtx() {
 // ---- Mock subagents extension (RPC responders) ----
 
 /** Simulates the @tintinweb/pi-subagents extension: responds to ping + spawn RPCs and emits ready. */
-function installSubagentsMock(pi: { events: { on: Function; emit: Function } }, opts?: { spawnError?: string }) {
+function installSubagentsMock(pi: { events: MockEventBus }, opts?: { spawnError?: string }) {
   let idCounter = 0;
   const spawned: Array<{ id: string; type: string; prompt: string; options: any }> = [];
   const stopped: string[] = [];
@@ -712,7 +717,7 @@ describe("RPC protocol correctness", () => {
 });
 
 /** Install a ping-only mock with a specific protocol version (or no version for v1). */
-function installVersionedMock(pi: { events: { on: Function; emit: Function } }, version?: number) {
+function installVersionedMock(pi: { events: MockEventBus }, version?: number) {
   const unsubPing = pi.events.on("subagents:rpc:ping", (data: unknown) => {
     const { requestId } = data as { requestId: string };
     if (version !== undefined) {

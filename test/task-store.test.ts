@@ -1,9 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { TaskStore } from "../src/task-store.js";
-import { existsSync, rmSync, mkdirSync, readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { homedir } from "node:os";
-import { tmpdir } from "node:os";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { TaskStore } from "../src/task-store.js";
 
 describe("TaskStore (in-memory)", () => {
   let store: TaskStore;

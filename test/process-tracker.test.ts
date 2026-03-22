@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { ProcessTracker } from "../src/process-tracker.js";
 import { spawn } from "node:child_process";
+import { beforeEach, describe, expect, it } from "vitest";
+import { ProcessTracker } from "../src/process-tracker.js";
 
 describe("ProcessTracker", () => {
   let tracker: ProcessTracker;

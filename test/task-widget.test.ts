@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { TaskWidget, type UICtx, type Theme, type TaskMetrics } from "../src/ui/task-widget.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskStore } from "../src/task-store.js";
+import { TaskWidget, type Theme, type UICtx } from "../src/ui/task-widget.js";
 
 /** Create a mock theme that returns raw text (no ANSI escapes). */
 function mockTheme(): Theme {
