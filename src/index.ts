@@ -74,52 +74,70 @@ export default function (pi: ExtensionAPI) {
   /** Maps agent IDs to task IDs for O(1) completion lookup. */
   const agentTaskMap = new Map<string, string>();
 
-  // ── Subagent extension presence detection ──
-  // Two paths: (1) listen for ready broadcast (subagents loads first),
-  //            (2) send ping on our init (tasks loads first).
-  let subagentsAvailable = false;
+  // ── Subagent RPC helpers ──
 
-  // Ping subagents extension — scoped reply channel, no filtering needed
-  const pingId = randomUUID();
-  const unsubPing = pi.events.on(`subagents:rpc:ping:reply:${pingId}`, () => {
-    subagentsAvailable = true;
-    unsubPing();
-  });
-  pi.events.emit("subagents:rpc:ping", { requestId: pingId });
+  /** RPC reply envelope — matches pi-mono's RpcResponse shape. */
+  type RpcReply<T = void> =
+    | { success: true; data?: T }
+    | { success: false; error: string };
 
-  // Also listen for ready broadcast (covers: subagents loads after us)
-  pi.events.on("subagents:ready", () => {
-    subagentsAvailable = true;
-    unsubPing();   // clean up ping listener if still pending
-  });
+  /** Call a subagents RPC method: emit request, wait for scoped reply, unwrap envelope. */
+  function rpcCall<T>(channel: string, params: Record<string, unknown>, timeoutMs: number): Promise<T> {
+    const requestId = randomUUID();
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => { unsub(); reject(new Error(`${channel} timeout`)); }, timeoutMs);
+      const unsub = pi.events.on(`${channel}:reply:${requestId}`, (raw: unknown) => {
+        unsub(); clearTimeout(timer);
+        const reply = raw as RpcReply<T>;
+        if (reply.success) resolve(reply.data as T);
+        else reject(new Error(reply.error));
+      });
+      pi.events.emit(channel, { requestId, ...params });
+    });
+  }
 
   /** Spawn a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension). */
   function spawnSubagent(type: string, prompt: string, options?: any): Promise<string> {
-    const requestId = randomUUID();
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { unsub(); reject(new Error("subagents:rpc:spawn timeout")); }, 30000);
-      const unsub = pi.events.on(`subagents:rpc:spawn:reply:${requestId}`, (p: unknown) => {
-        const { id, error } = p as { id?: string; error?: string };
-        unsub(); clearTimeout(timer);
-        if (error) reject(new Error(error));
-        else resolve(id!);
-      });
-      pi.events.emit("subagents:rpc:spawn", { requestId, type, prompt, options });
-    });
+    return rpcCall<{ id: string }>("subagents:rpc:spawn", { type, prompt, options }, 30_000).then(d => d.id);
   }
 
   /** Stop a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension). */
-  function stopSubagent(agentId: string): Promise<boolean> {
-    const requestId = randomUUID();
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => { unsub(); resolve(false); }, 10000);
-      const unsub = pi.events.on(`subagents:rpc:stop:reply:${requestId}`, (p: unknown) => {
-        unsub(); clearTimeout(timer);
-        resolve((p as any).success ?? false);
-      });
-      pi.events.emit("subagents:rpc:stop", { requestId, agentId });
-    });
+  function stopSubagent(agentId: string): Promise<void> {
+    return rpcCall<void>("subagents:rpc:stop", { agentId }, 10_000).catch(() => {});
   }
+
+  // ── Subagent extension presence & version detection ──
+  const PROTOCOL_VERSION = 2;
+  let subagentsAvailable = false;
+  let pendingWarning: string | undefined;
+
+  /** Ping subagents and check protocol version. Works with any handler version. */
+  function checkSubagentsVersion() {
+    const requestId = randomUUID();
+    const timer = setTimeout(() => { unsub(); }, 5_000);
+    const unsub = pi.events.on(`subagents:rpc:ping:reply:${requestId}`, (raw: unknown) => {
+      unsub(); clearTimeout(timer);
+      const remoteVersion = (raw as any)?.data?.version as number | undefined;
+      if (remoteVersion === undefined) {
+        pendingWarning =
+          "@tintinweb/pi-subagents is outdated — please update for task execution support.";
+      } else if (remoteVersion > PROTOCOL_VERSION) {
+        pendingWarning =
+          `@tintinweb/pi-tasks is outdated (protocol v${PROTOCOL_VERSION}, ` +
+          `pi-subagents has v${remoteVersion}) — please update for task execution support.`;
+      } else if (remoteVersion < PROTOCOL_VERSION) {
+        pendingWarning =
+          `@tintinweb/pi-subagents is outdated (protocol v${remoteVersion}, ` +
+          `pi-tasks has v${PROTOCOL_VERSION}) — please update for task execution support.`;
+      } else {
+        subagentsAvailable = true;
+      }
+    });
+    pi.events.emit("subagents:rpc:ping", { requestId });
+  }
+
+  checkSubagentsVersion();
+  pi.events.on("subagents:ready", () => checkSubagentsVersion());
 
   /** Build a prompt for a task being executed by a subagent. */
   function buildTaskPrompt(task: { id: string; subject: string; description: string }, additionalContext?: string): string {
@@ -283,6 +301,10 @@ export default function (pi: ExtensionAPI) {
     widget.setUICtx(ctx.ui as UICtx);
     upgradeStoreIfNeeded(ctx);
     showPersistedTasks();
+    if (pendingWarning) {
+      ctx.ui.notify(pendingWarning, "warning");
+      pendingWarning = undefined;
+    }
   });
 
   // session_switch fires on resume (reason: "resume") — reload persisted tasks.
