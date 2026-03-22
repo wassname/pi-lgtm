@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **RPC-based subagent spawning** — `TaskExecute` now communicates with `@tintinweb/pi-subagents` via a standardized RPC envelope (`rpcCall` helper) with protocol version negotiation and timeout handling.
+- **RPC-based subagent stopping** — `stopSubagent` sends stop requests via `subagents:rpc:stop` event bus RPC.
+- **TaskOutput supports subagent tasks** — can wait for subagent completion with blocking/timeout, using `subagents:completed` and `subagents:failed` events.
+- **TaskStop supports subagent tasks** — stops running subagents via RPC and marks the task as completed.
+- **Debug logging** — set `PI_TASKS_DEBUG=1` to trace RPC communication (request/reply/timeout) and spawn errors to stderr.
+- **TaskExecute prompt guidelines** — agents are instructed not to use the Agent tool for tasks already launched via TaskExecute.
+- **Biome linter** — added [Biome](https://biomejs.dev/) for correctness linting.
+
+### Changed
+- **TaskOutput/TaskStop accept agent IDs** — both tools now resolve agent IDs (including partial prefixes) to task IDs via `agentTaskMap`, fixing the mismatch where TaskExecute returns agent IDs but TaskOutput/TaskStop only accepted task IDs.
+- **TaskGet shows metadata** — non-empty metadata is now displayed in TaskGet output as JSON.
+- **TaskGet filters completed blockers** — consistent with TaskList, TaskGet now only shows open (non-completed) blockers instead of all dependency edges.
+- **TaskExecute success message** — now includes guidance to use TaskOutput for progress and not spawn duplicate agents.
+- **Softened TaskExecute description** — removed "Requires @tintinweb/pi-subagents extension" from the tool description to prevent agents from refusing to use it when the extension is loaded.
+- **Stopped subagents handled gracefully** — `subagents:failed` listener now distinguishes intentional stops (status `"stopped"` → mark completed, preserve partial result) from actual errors (revert to pending).
+
 ## [0.3.3] - 2026-03-17
 
 ### Added

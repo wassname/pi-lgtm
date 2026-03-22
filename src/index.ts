@@ -24,6 +24,13 @@ import { openSettingsMenu } from "./ui/settings-menu.js";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 
+// ---- Debug ----
+
+const DEBUG = !!process.env.PI_TASKS_DEBUG;
+function debug(...args: unknown[]) {
+  if (DEBUG) console.error("[pi-tasks]", ...args);
+}
+
 // ---- Helpers ----
 
 function textResult(msg: string) {
@@ -84,21 +91,30 @@ export default function (pi: ExtensionAPI) {
   /** Call a subagents RPC method: emit request, wait for scoped reply, unwrap envelope. */
   function rpcCall<T>(channel: string, params: Record<string, unknown>, timeoutMs: number): Promise<T> {
     const requestId = randomUUID();
+    debug(`rpc:send ${channel}`, { requestId });
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => { unsub(); reject(new Error(`${channel} timeout`)); }, timeoutMs);
+      const timer = setTimeout(() => {
+        unsub();
+        debug(`rpc:timeout ${channel}`, { requestId });
+        reject(new Error(`${channel} timeout`));
+      }, timeoutMs);
       const unsub = pi.events.on(`${channel}:reply:${requestId}`, (raw: unknown) => {
         unsub(); clearTimeout(timer);
+        debug(`rpc:reply ${channel}`, { requestId, raw });
         const reply = raw as RpcReply<T>;
         if (reply.success) resolve(reply.data as T);
         else reject(new Error(reply.error));
       });
       pi.events.emit(channel, { requestId, ...params });
+      debug(`rpc:emitted ${channel}`, { requestId });
     });
   }
 
   /** Spawn a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension). */
   function spawnSubagent(type: string, prompt: string, options?: any): Promise<string> {
-    return rpcCall<{ id: string }>("subagents:rpc:spawn", { type, prompt, options }, 30_000).then(d => d.id);
+    debug("spawn:call", { type, options: { ...options, prompt: undefined } });
+    return rpcCall<{ id: string }>("subagents:rpc:spawn", { type, prompt, options }, 30_000)
+      .then(d => { debug("spawn:ok", d); return d.id; });
   }
 
   /** Stop a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension). */
@@ -508,10 +524,22 @@ Returns full task details:
       lines.push(`Description: ${desc}`);
 
       if (task.blockedBy.length > 0) {
-        lines.push(`Blocked by: ${task.blockedBy.map(id => "#" + id).join(", ")}`);
+        const openBlockers = task.blockedBy.filter(bid => {
+          const blocker = store.get(bid);
+          return blocker && blocker.status !== "completed";
+        });
+        if (openBlockers.length > 0) {
+          lines.push(`Blocked by: ${openBlockers.map(id => "#" + id).join(", ")}`);
+        }
       }
       if (task.blocks.length > 0) {
         lines.push(`Blocks: ${task.blocks.map(id => "#" + id).join(", ")}`);
+      }
+
+      // Show metadata if non-empty
+      const metaKeys = Object.keys(task.metadata);
+      if (metaKeys.length > 0) {
+        lines.push(`Metadata: ${JSON.stringify(task.metadata)}`);
       }
 
       return Promise.resolve(textResult(lines.join("\n")));
@@ -671,7 +699,15 @@ Set up task dependencies:
       const processOutput = tracker.getOutput(task_id);
       if (!processOutput) {
         // No shell process — check if this is a subagent task
-        const task = store.get(task_id);
+        // Support both task IDs and agent IDs (resolve agent ID → task ID)
+        let resolvedId = task_id;
+        if (!store.get(resolvedId)) {
+          // Check if this is an agent ID mapped to a task
+          for (const [agentId, taskId] of agentTaskMap) {
+            if (agentId === task_id || agentId.startsWith(task_id)) { resolvedId = taskId; break; }
+          }
+        }
+        const task = store.get(resolvedId);
         if (!task) throw new Error(`No task found with ID ${task_id}`);
 
         if (task.metadata?.agentId) {
@@ -737,7 +773,14 @@ Set up task dependencies:
       const stopped = await tracker.stop(taskId);
       if (!stopped) {
         // No shell process — check if this is a subagent task
-        const task = store.get(taskId);
+        // Support both task IDs and agent IDs
+        let resolvedId = taskId;
+        if (!store.get(resolvedId)) {
+          for (const [agentId, tId] of agentTaskMap) {
+            if (agentId === taskId || agentId.startsWith(taskId)) { resolvedId = tId; break; }
+          }
+        }
+        const task = store.get(resolvedId);
         if (task?.metadata?.agentId && task.status === "in_progress") {
           store.update(taskId, { status: "completed" });
           await stopSubagent(task.metadata.agentId);
@@ -762,7 +805,7 @@ Set up task dependencies:
   pi.registerTool({
     name: "TaskExecute",
     label: "TaskExecute",
-    description: `Execute one or more tasks as subagents. Requires @tintinweb/pi-subagents extension.
+    description: `Execute one or more tasks as subagents.
 
 ## When to Use This Tool
 
@@ -776,6 +819,9 @@ Set up task dependencies:
 - **additional_context**: Extra context appended to each agent's prompt
 - **model**: Model override for agents (e.g., "sonnet", "haiku")
 - **max_turns**: Maximum turns per agent`,
+    promptGuidelines: [
+      "Never use the Agent tool for tasks launched via TaskExecute — agents are already running.",
+    ],
     parameters: Type.Object({
       task_ids: Type.Array(Type.String(), { description: "Task IDs to execute as subagents" }),
       additional_context: Type.Optional(Type.String({ description: "Extra context for agent prompts" })),
@@ -786,8 +832,8 @@ Set up task dependencies:
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       if (!subagentsAvailable) {
         return textResult(
-          "TaskExecute requires the @tintinweb/pi-subagents extension to be loaded. " +
-          "Install and enable it, then try again."
+          "Subagent execution is currently unavailable. " +
+          "Ensure the @tintinweb/pi-subagents extension is loaded and try again."
         );
       }
 
@@ -833,6 +879,7 @@ Set up task dependencies:
           widget.setActiveTask(taskId);
           launched.push(`#${taskId} → agent ${agentId}`);
         } catch (err: any) {
+          debug(`spawn:error task=#${taskId}`, err);
           store.update(taskId, { status: "pending" });
           results.push(`#${taskId}: spawn failed — ${err.message}`);
         }
@@ -848,7 +895,12 @@ Set up task dependencies:
       widget.update();
 
       const lines: string[] = [];
-      if (launched.length > 0) lines.push(`Launched ${launched.length} agent(s):\n${launched.join("\n")}`);
+      if (launched.length > 0) {
+        lines.push(
+          `Launched ${launched.length} agent(s):\n${launched.join("\n")}\n` +
+          `Use TaskOutput to check progress. Do not spawn additional agents for these tasks.`
+        );
+      }
       if (results.length > 0) lines.push(`Skipped:\n${results.join("\n")}`);
       if (lines.length === 0) lines.push("No tasks to execute.");
 
