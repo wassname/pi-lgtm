@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { AutoClearManager } from "./auto-clear.js";
 import { ProcessTracker } from "./process-tracker.js";
 import { TaskStore } from "./task-store.js";
 import { loadTasksConfig } from "./tasks-config.js";
@@ -42,6 +43,9 @@ const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdat
 
 /** How many turns without task tool usage before injecting a reminder. */
 const REMINDER_INTERVAL = 4;
+
+/** How many turns completed tasks linger before auto-clearing. */
+const AUTO_CLEAR_DELAY = 4;
 
 const SYSTEM_REMINDER = `<system-reminder>
 The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable. Make sure that you NEVER mention this reminder to the user
@@ -163,6 +167,8 @@ export default function (pi: ExtensionAPI) {
     return prompt;
   }
 
+  const autoClear = new AutoClearManager(store, () => cfg.autoClearCompleted ?? "on_list_complete", AUTO_CLEAR_DELAY);
+
   // ── Subagent completion listener ──
   // Listens for subagent lifecycle events to update task status and optionally cascade.
 
@@ -203,6 +209,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
     }
+    autoClear.trackCompletion(task.id, currentTurn);
     widget.update();
   });
 
@@ -219,9 +226,11 @@ export default function (pi: ExtensionAPI) {
     if (status === "stopped") {
       // Intentional stop — mark completed, preserve partial result
       store.update(task.id, { status: "completed", metadata: { ...task.metadata, result: result || task.metadata?.result } });
+      autoClear.trackCompletion(task.id, currentTurn);
     } else {
       // Actual error — revert to pending
       store.update(task.id, { status: "pending", metadata: { ...task.metadata, lastError: error || status } });
+      autoClear.resetBatchCountdown();
     }
     widget.setActiveTask(task.id, false);
     widget.update();
@@ -272,6 +281,7 @@ export default function (pi: ExtensionAPI) {
     latestCtx = ctx;
     widget.setUICtx(ctx.ui as UICtx);
     upgradeStoreIfNeeded(ctx);
+    if (autoClear.onTurnStart(currentTurn)) widget.update();
   });
 
   // ── Token usage tracking ──
@@ -323,12 +333,25 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // session_switch fires on resume (reason: "resume") — reload persisted tasks.
+  // session_switch fires on /new (reason: "new") and /resume (reason: "resume").
+  // On /new: reset all session-scoped state so the store switches to the new session file.
+  // On resume: reload persisted tasks from the existing session file.
   pi.on("session_switch" as any, async (event: any, ctx: ExtensionContext) => {
     latestCtx = ctx;
     widget.setUICtx(ctx.ui as UICtx);
+
+    const isResume = event?.reason === "resume";
+    if (!isResume) {
+      storeUpgraded = false;
+      persistedTasksShown = false;
+      currentTurn = 0;
+      lastTaskToolUseTurn = 0;
+      reminderInjectedThisCycle = false;
+      autoClear.reset();
+    }
+
     upgradeStoreIfNeeded(ctx);
-    showPersistedTasks(event?.reason === "resume");
+    showPersistedTasks(isResume);
   });
 
   // Keep latestCtx fresh on every tool execution as well.
@@ -401,6 +424,7 @@ All tasks are created with status \`pending\`.
     }),
 
     execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      autoClear.resetBatchCountdown();
       const meta = params.metadata ?? {};
       if (params.agentType) meta.agentType = params.agentType;
       const task = store.create(params.subject, params.description, params.activeForm, Object.keys(meta).length > 0 ? meta : undefined);
@@ -660,8 +684,12 @@ Set up task dependencies:
       // Update widget active task tracking
       if (fields.status === "in_progress") {
         widget.setActiveTask(taskId);
+        autoClear.resetBatchCountdown();
+      } else if (fields.status === "pending") {
+        autoClear.resetBatchCountdown();
       } else if (fields.status === "completed" || fields.status === "deleted") {
         widget.setActiveTask(taskId, false);
+        if (fields.status === "completed") autoClear.trackCompletion(taskId, currentTurn);
       }
 
       widget.update();
@@ -783,6 +811,7 @@ Set up task dependencies:
         const task = store.get(resolvedId);
         if (task?.metadata?.agentId && task.status === "in_progress") {
           store.update(taskId, { status: "completed" });
+          autoClear.trackCompletion(taskId, currentTurn);
           await stopSubagent(task.metadata.agentId);
           widget.setActiveTask(taskId, false);
           widget.update();
@@ -792,6 +821,7 @@ Set up task dependencies:
       }
 
       store.update(taskId, { status: "completed" });
+      autoClear.trackCompletion(taskId, currentTurn);
       widget.setActiveTask(taskId, false);
       widget.update();
       return textResult(`Task #${taskId} stopped successfully`);
@@ -1006,6 +1036,7 @@ Set up task dependencies:
           return viewTasks();
         } else if (action === "✓ Complete") {
           store.update(taskId, { status: "completed" });
+          autoClear.trackCompletion(taskId, currentTurn);
           widget.setActiveTask(taskId, false);
           widget.update();
           return viewTasks();
@@ -1019,7 +1050,7 @@ Set up task dependencies:
       };
 
       const settingsMenu = (): Promise<void> =>
-        openSettingsMenu(ui, cfg, mainMenu);
+        openSettingsMenu(ui, cfg, mainMenu, AUTO_CLEAR_DELAY);
 
       const createTask = async (): Promise<void> => {
         const subject = await ui.input("Task subject");

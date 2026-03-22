@@ -190,7 +190,19 @@ Task storage is controlled by the `taskScope` setting (`/tasks` → Settings →
 
 On new session start, if all persisted tasks are completed they are auto-cleared for a clean slate. On session resume, all tasks (including completed) are shown so the user can review progress. Empty session files are automatically deleted when all tasks are cleared.
 
-Settings (`taskScope`, `autoCascade`) are saved to `<cwd>/.pi/tasks-config.json`.
+### Auto-clear completed tasks
+
+The `autoClearCompleted` setting controls automatic cleanup of completed tasks:
+
+| Mode | Behaviour |
+|------|-----------|
+| `never` | Completed tasks stay visible until manually cleared via `/tasks` → Clear completed |
+| `on_list_complete` **(default)** | Cleared after all tasks are done and a few idle turns pass |
+| `on_task_complete` | Each completed task cleared individually after a few turns |
+
+Both auto-clear modes use a turn-based delay for non-jarring UX — tasks linger briefly so you see the completion before they disappear.
+
+Settings (`taskScope`, `autoCascade`, `autoClearCompleted`) are saved to `<cwd>/.pi/tasks-config.json`.
 
 ### Override via environment variables
 
@@ -232,7 +244,7 @@ Tasks
 - **Create task** — input prompts for subject and description
 - **Clear completed** — remove all completed tasks
 - **Clear all** — remove all tasks regardless of status
-- **Settings** — configure task storage mode and auto-cascade (saved to `tasks-config.json`)
+- **Settings** — configure task storage, auto-cascade, and auto-clear completed tasks (saved to `tasks-config.json`)
 
 ## Cross-extension Communication with [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents)
 
@@ -291,7 +303,8 @@ src/
 ├── index.ts            # Extension entry: 7 tools + /tasks command + widget + subagent integration
 ├── types.ts            # Task, TaskStatus, BackgroundProcess types
 ├── task-store.ts       # File-backed store with CRUD, dependencies, locking
-├── tasks-config.ts     # Config persistence (taskScope, autoCascade) → .pi/tasks-config.json
+├── auto-clear.ts       # Turn-based auto-clearing of completed tasks (AutoClearManager)
+├── tasks-config.ts     # Config persistence (taskScope, autoCascade, autoClearCompleted) → .pi/tasks-config.json
 ├── process-tracker.ts  # Background process output buffering and stop
 └── ui/
     ├── task-widget.ts  # Persistent widget with status icons and spinner
@@ -307,7 +320,7 @@ src/
 ```bash
 npm install
 npm run typecheck   # TypeScript validation
-npm test            # Run unit tests (125 tests)
+npm test            # Run unit tests (143 tests)
 ```
 
 ## License

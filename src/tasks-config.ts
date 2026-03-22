@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 export interface TasksConfig {
   taskScope?: "memory" | "session" | "project";  // default: "session"
   autoCascade?: boolean;   // default: false
+  autoClearCompleted?: "never" | "on_list_complete" | "on_task_complete";  // default: "on_list_complete"
 }
 
 const CONFIG_PATH = join(process.cwd(), ".pi", "tasks-config.json");

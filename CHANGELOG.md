@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-03-22
+
+### Added
+- **Auto-clear completed tasks** — new `autoClearCompleted` setting with three modes:
+  - `never`: completed tasks stay visible until manually cleared
+  - `on_list_complete` **(default)**: completed tasks are cleared after all tasks are done and a few turns pass — user sees the "all done" state before cleanup
+  - `on_task_complete`: each completed task is cleared individually after a few turns
+  - Both auto-clear modes use a turn-based delay (matching `REMINDER_INTERVAL`) for consistent, non-jarring UX — tasks linger briefly so the user sees the completion before they disappear
+- **`AutoClearManager`** — extracted, testable class (`src/auto-clear.ts`) handling turn-based clearing logic with per-task and batch countdown tracking
+- **15 new unit tests** — full coverage of all three auto-clear modes, turn delays, dependency cleanup, batch reset, and dynamic mode switching
+
+### Changed
+- **Settings** — `/tasks` → Settings now shows "Auto-clear completed tasks" toggle with `never` / `on_list_complete` / `on_task_complete` values. Also configurable via `.pi/tasks-config.json`.
+
+### Fixed
+- **`/new` now correctly switches to a new session task store** — `storeUpgraded` and `persistedTasksShown` flags were never reset on `session_switch`, causing the store to stay pointed at the old session file. All session-scoped state (turn counters, reminder flags, auto-clear tracking) is now reset on `/new`.
+
 ## [0.4.0] - 2026-03-22
 
 ### Added
@@ -111,6 +128,7 @@ Initial release — Claude Code-style task tracking and coordination for pi.
 - **Background process tracker** — output buffering (stdout + stderr), waiter notification, graceful stop with timeout escalation (SIGTERM → 5s → SIGKILL).
 - **78 unit tests** — task store CRUD, dependencies, warnings, file persistence; widget rendering, icons, spinners, token/duration formatting; process tracker lifecycle.
 
+[0.4.1]: https://github.com/tintinweb/pi-tasks/releases/tag/v0.4.1
 [0.4.0]: https://github.com/tintinweb/pi-tasks/releases/tag/v0.4.0
 [0.3.3]: https://github.com/tintinweb/pi-tasks/releases/tag/v0.3.3
 [0.3.2]: https://github.com/tintinweb/pi-tasks/releases/tag/v0.3.2
