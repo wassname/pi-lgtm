@@ -96,7 +96,7 @@ describe("TaskWidget", () => {
 
     const lines = renderWidget(ui.state);
     expect(lines[1]).toContain("✔");
-    expect(lines[1]).toContain("~~Done task~~");
+    expect(lines[1]).toContain("~~#1 Done task~~");
   });
 
   it("renders active tasks with spinner icon", () => {
@@ -213,7 +213,7 @@ describe("TaskWidget", () => {
     // Should render as completed, not active
     const lines = renderWidget(ui.state);
     expect(lines[1]).toContain("✔");
-    expect(lines[1]).toContain("~~Task~~");
+    expect(lines[1]).toContain("~~#1 Task~~");
   });
 
   it("supports multiple active tasks simultaneously", () => {
