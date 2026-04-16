@@ -192,6 +192,9 @@ export class TaskWidget {
       }
 
       lines.push(truncate(text + suffix));
+      if (!isActive && task.status !== "completed" && (task as any).done_criterion) {
+        lines.push(truncate(`       ${(task as any).done_criterion}`));
+      }
     }
 
     if (tasks.length > MAX_VISIBLE_TASKS) {
