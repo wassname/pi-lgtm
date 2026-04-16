@@ -193,7 +193,7 @@ export class TaskWidget {
 
       lines.push(truncate(text + suffix));
       if (!isActive && task.status !== "completed" && (task as any).done_criterion) {
-        lines.push(truncate(`       ${(task as any).done_criterion}`));
+        lines.push(truncate(`       lgtm: ${(task as any).done_criterion}`));
       }
     }
 
