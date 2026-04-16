@@ -1,5 +1,7 @@
 # @wassname/pi-lgtm
 
+Help your agent track goals and aim for human sign off.
+
 A [pi](https://pi.dev) extension that adds structured human sign-off to task tracking. Fork of [@tintinweb/pi-tasks](https://github.com/tintinweb/pi-tasks) with a minimal LGTM layer.
 
 The core idea: agents cannot mark tasks complete themselves. They must call `lgtm_ask` with auditable evidence and explicit failure-mode analysis, then a human signs off via `/lgtm <id>`.
@@ -15,6 +17,8 @@ Or for development:
 ```bash
 pi -e ./src/index.ts
 ```
+
+![example](media/screenshot.png)
 
 ## What is different from pi-tasks
 
