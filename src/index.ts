@@ -339,7 +339,7 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
 - **evidence**: Auditable proof — command output, table, file path, link
 - **failure_mode_1**: Most likely way this could be wrong despite evidence
 - **failure_mode_2**: Most subtle/perverse failure -- silent fail, null hypothesis, or one that your evidence would NOT distinguish from success
-- **falsification_test**: Concrete command that would falsify your claim. Include: exact command, expected output if claim is true, expected output if a failure mode is real, and why this test can't accidentally pass under the failure. Think especially about: null hypothesis (feature isn't active at all), silent failures (error swallowed, fallback triggered silently), and tests that pass in test env but would fail in prod.
+- **falsification_test**: Concrete check that distinguishes your hypothesis from failure modes. Can be a command, a procedure, a log snippet to look for, or an experiment observation. Include: what to run or observe, what you expect if claim is true, what you expect if a failure mode is real, and why this check can't accidentally pass under the failure. Think especially about: null hypothesis (feature isn't active at all), silent failures (error swallowed, fallback triggered silently), and env mismatch (passes in test, broken in prod).
 - **evidence_files** (optional): File paths human should inspect -- must exist
 - **remaining_uncertainty** (optional): What's NOT tested, known limitations, deferred edge cases`,
     parameters: Type.Object({
@@ -347,7 +347,7 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
       evidence: Type.String({ description: "Auditable proof with full reproducibility: exact command run and its output, commit hash, config/seeds used, output file paths. Must be re-runnable by the human. 'I wrote X' is not evidence -- 'I ran X and got Y' is. Include counts, snippets, test output." }),
       failure_mode_1: Type.String({ description: "Most likely way this could be wrong despite evidence" }),
       failure_mode_2: Type.String({ description: "Most subtle or hard-to-distinguish failure: silent fail, null hypothesis (feature not active at all), or a bug your evidence would NOT distinguish from correct behavior" }),
-      falsification_test: Type.String({ description: "Exact command + expected output when claim is TRUE vs when a failure mode is real. Explain why the test can't accidentally pass under the failure. Cover at least: null hypothesis (feature not active), silent fail (error swallowed/fallback triggered), and env mismatch (passes in test, broken in prod)." }),
+      falsification_test: Type.String({ description: "Concrete check (command, procedure, log inspection, or experiment observation) that distinguishes your hypothesis from failure modes. State: what to run/observe, expected result if claim is true, expected result if a failure mode is real, why this can't accidentally pass under the failure. Cover: null hypothesis, silent fail, env mismatch." }),
       evidence_files: Type.Optional(Type.Array(Type.String(), { description: "File paths to inspect (must exist)" })),
       remaining_uncertainty: Type.Optional(Type.String({ description: "What's NOT tested, known limitations, edge cases deferred. Be honest about scope boundaries." })),
     }),
