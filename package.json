@@ -1,25 +1,24 @@
 {
-  "name": "@tintinweb/pi-tasks",
+  "name": "@wassname/pi-lgtm",
   "version": "0.4.2",
-  "description": "A pi extension that brings Claude Code-style task tracking and coordination to pi.",
-  "author": "tintinweb",
+  "description": "A pi extension providing goal tracking with structural sign-off and LGTM workflow.",
+  "author": "wassname",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tintinweb/pi-tasks.git"
+    "url": "https://github.com/wassname/pi-lgtm.git"
   },
-  "homepage": "https://github.com/tintinweb/pi-tasks#readme",
+  "homepage": "https://github.com/wassname/pi-lgtm#readme",
   "bugs": {
-    "url": "https://github.com/tintinweb/pi-tasks/issues"
+    "url": "https://github.com/wassname/pi-lgtm/issues"
   },
   "keywords": [
     "pi-package",
     "pi",
     "pi-extension",
-    "task",
-    "tasks",
-    "todo",
-    "coordination"
+    "lgtm",
+    "sign-off",
+    "goal-tracking"
   ],
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.62.0",
@@ -45,7 +44,7 @@
     "extensions": [
       "./src/index.ts"
     ],
-    "video": "https://github.com/tintinweb/pi-tasks/raw/master/media/demo.mp4",
-    "image": "https://github.com/tintinweb/pi-tasks/raw/master/media/screenshot.png"
+    "video": "",
+    "image": ""
   }
 }

@@ -187,7 +187,8 @@ export class TaskWidget {
         const agentSuffix = task.status === "in_progress" && task.metadata?.agentId
           ? theme.fg("dim", ` (agent ${task.metadata.agentId.slice(0, 5)})`)
           : "";
-        text = `  ${icon} ${theme.fg("dim", "#" + task.id)} ${task.subject}${agentSuffix}`;
+        const approvalSuffix = (task as any).pending_approval ? " 👀" : "";
+        text = `  ${icon} ${theme.fg("dim", "#" + task.id)} ${task.subject}${agentSuffix}${approvalSuffix}`;
       }
 
       lines.push(truncate(text + suffix));

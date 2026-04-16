@@ -14,24 +14,17 @@ const TASKS_DIR = join(homedir(), ".pi", "tasks");
 const LOCK_RETRY_MS = 50;
 const LOCK_MAX_RETRIES = 100; // 5s max
 
-/** Simple file-based locking. */
 function acquireLock(lockPath: string): void {
   for (let i = 0; i < LOCK_MAX_RETRIES; i++) {
     try {
-      // O_EXCL: fail if file exists
       writeFileSync(lockPath, `${process.pid}`, { flag: "wx" });
       return;
     } catch (e: any) {
       if (e.code === "EEXIST") {
-        // Check for stale lock (process no longer running)
         try {
           const pid = parseInt(readFileSync(lockPath, "utf-8"), 10);
-          if (pid && !isProcessRunning(pid)) {
-            unlinkSync(lockPath);
-            continue;
-          }
-        } catch { /* ignore read errors */ }
-        // Wait and retry
+          if (pid && !isProcessRunning(pid)) { unlinkSync(lockPath); continue; }
+        } catch { /* ignore */ }
         const start = Date.now();
         while (Date.now() - start < LOCK_RETRY_MS) { /* busy wait */ }
         continue;
@@ -53,8 +46,6 @@ function isProcessRunning(pid: number): boolean {
 export class TaskStore {
   private filePath: string | undefined;
   private lockPath: string | undefined;
-
-  // In-memory state (always kept in sync)
   private nextId = 1;
   private tasks = new Map<string, Task>();
 
@@ -68,61 +59,42 @@ export class TaskStore {
     this.load();
   }
 
-  /** Read store from disk (file-backed mode only). */
   private load(): void {
-    if (!this.filePath) return;
-    if (!existsSync(this.filePath)) return;
+    if (!this.filePath || !existsSync(this.filePath)) return;
     try {
       const data: TaskStoreData = JSON.parse(readFileSync(this.filePath, "utf-8"));
       this.nextId = data.nextId;
       this.tasks.clear();
-      for (const t of data.tasks) {
-        this.tasks.set(t.id, t);
-      }
+      for (const t of data.tasks) this.tasks.set(t.id, t);
     } catch { /* corrupt file — start fresh */ }
   }
 
-  /** Write store to disk atomically (file-backed mode only). */
   private save(): void {
     if (!this.filePath) return;
-    const data: TaskStoreData = {
-      nextId: this.nextId,
-      tasks: Array.from(this.tasks.values()),
-    };
     const tmpPath = this.filePath + ".tmp";
-    writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+    writeFileSync(tmpPath, JSON.stringify({ nextId: this.nextId, tasks: Array.from(this.tasks.values()) }, null, 2));
     renameSync(tmpPath, this.filePath);
   }
 
-  /** Execute a mutation with file locking (if file-backed). */
   private withLock<T>(fn: () => T): T {
     if (!this.lockPath) return fn();
     acquireLock(this.lockPath);
-    try {
-      this.load(); // Re-read latest state
-      const result = fn();
-      this.save();
-      return result;
-    } finally {
-      releaseLock(this.lockPath);
-    }
+    try { this.load(); const result = fn(); this.save(); return result; }
+    finally { releaseLock(this.lockPath); }
   }
 
-  create(subject: string, description: string, activeForm?: string, metadata?: Record<string, any>): Task {
+  create(subject: string, description: string, done_criterion: string, activeForm?: string, metadata?: Record<string, any>): Task {
     return this.withLock(() => {
       const now = Date.now();
       const task: Task = {
         id: String(this.nextId++),
-        subject,
-        description,
+        subject, description, done_criterion,
+        pending_approval: false,
         status: "pending",
-        activeForm,
-        owner: undefined,
+        activeForm, owner: undefined,
         metadata: metadata ?? {},
-        blocks: [],
-        blockedBy: [],
-        createdAt: now,
-        updatedAt: now,
+        blocks: [], blockedBy: [],
+        createdAt: now, updatedAt: now,
       };
       this.tasks.set(task.id, task);
       return task;
@@ -134,16 +106,17 @@ export class TaskStore {
     return this.tasks.get(id);
   }
 
-  /** List all tasks sorted by ID ascending. */
   list(): Task[] {
     if (this.filePath) this.load();
     return Array.from(this.tasks.values()).sort((a, b) => Number(a.id) - Number(b.id));
   }
 
   update(id: string, fields: {
-    status?: TaskStatus | "deleted";
+    status?: Exclude<TaskStatus, "completed"> | "deleted";
     subject?: string;
     description?: string;
+    done_criterion?: string;
+    pending_approval?: boolean;
     activeForm?: string;
     owner?: string;
     metadata?: Record<string, any>;
@@ -157,10 +130,12 @@ export class TaskStore {
       const changedFields: string[] = [];
       const warnings: string[] = [];
 
-      // Handle deletion
+      if ((fields.status as string) === "completed") {
+        throw new Error(`Use /lgtm ${id} to complete tasks. Call lgtm_ask first to submit evidence.`);
+      }
+
       if (fields.status === "deleted") {
         this.tasks.delete(id);
-        // Clean up dependency edges pointing to this task
         for (const t of this.tasks.values()) {
           t.blocks = t.blocks.filter(bid => bid !== id);
           t.blockedBy = t.blockedBy.filter(bid => bid !== id);
@@ -168,80 +143,42 @@ export class TaskStore {
         return { task: undefined, changedFields: ["deleted"], warnings: [] };
       }
 
-      if (fields.status !== undefined) {
-        task.status = fields.status;
-        changedFields.push("status");
-      }
-      if (fields.subject !== undefined) {
-        task.subject = fields.subject;
-        changedFields.push("subject");
-      }
-      if (fields.description !== undefined) {
-        task.description = fields.description;
-        changedFields.push("description");
-      }
-      if (fields.activeForm !== undefined) {
-        task.activeForm = fields.activeForm;
-        changedFields.push("activeForm");
-      }
-      if (fields.owner !== undefined) {
-        task.owner = fields.owner;
-        changedFields.push("owner");
-      }
+      if (fields.status !== undefined) { task.status = fields.status as TaskStatus; changedFields.push("status"); }
+      if (fields.subject !== undefined) { task.subject = fields.subject; changedFields.push("subject"); }
+      if (fields.description !== undefined) { task.description = fields.description; changedFields.push("description"); }
+      if (fields.done_criterion !== undefined) { task.done_criterion = fields.done_criterion; changedFields.push("done_criterion"); }
+      if (fields.pending_approval !== undefined) { task.pending_approval = fields.pending_approval; changedFields.push("pending_approval"); }
+      if (fields.activeForm !== undefined) { task.activeForm = fields.activeForm; changedFields.push("activeForm"); }
+      if (fields.owner !== undefined) { task.owner = fields.owner; changedFields.push("owner"); }
 
-      // Metadata: shallow merge, null deletes keys
       if (fields.metadata !== undefined) {
         for (const [key, value] of Object.entries(fields.metadata)) {
-          if (value === null) {
-            delete task.metadata[key];
-          } else {
-            task.metadata[key] = value;
-          }
+          if (value === null) delete task.metadata[key];
+          else task.metadata[key] = value;
         }
         changedFields.push("metadata");
       }
 
-      // Bidirectional dependency edges
-      if (fields.addBlocks && fields.addBlocks.length > 0) {
+      if (fields.addBlocks?.length) {
         for (const targetId of fields.addBlocks) {
-          if (!task.blocks.includes(targetId)) {
-            task.blocks.push(targetId);
-          }
+          if (!task.blocks.includes(targetId)) task.blocks.push(targetId);
           const target = this.tasks.get(targetId);
-          if (target && !target.blockedBy.includes(id)) {
-            target.blockedBy.push(id);
-            target.updatedAt = Date.now();
-          }
-          // Warnings for problematic edges
-          if (targetId === id) {
-            warnings.push(`#${id} blocks itself`);
-          } else if (!target) {
-            warnings.push(`#${targetId} does not exist`);
-          } else if (target.blocks.includes(id)) {
-            warnings.push(`cycle: #${id} and #${targetId} block each other`);
-          }
+          if (target && !target.blockedBy.includes(id)) { target.blockedBy.push(id); target.updatedAt = Date.now(); }
+          if (targetId === id) warnings.push(`#${id} blocks itself`);
+          else if (!target) warnings.push(`#${targetId} does not exist`);
+          else if (target.blocks.includes(id)) warnings.push(`cycle: #${id} and #${targetId} block each other`);
         }
         changedFields.push("blocks");
       }
 
-      if (fields.addBlockedBy && fields.addBlockedBy.length > 0) {
+      if (fields.addBlockedBy?.length) {
         for (const targetId of fields.addBlockedBy) {
-          if (!task.blockedBy.includes(targetId)) {
-            task.blockedBy.push(targetId);
-          }
+          if (!task.blockedBy.includes(targetId)) task.blockedBy.push(targetId);
           const target = this.tasks.get(targetId);
-          if (target && !target.blocks.includes(id)) {
-            target.blocks.push(id);
-            target.updatedAt = Date.now();
-          }
-          // Warnings for problematic edges
-          if (targetId === id) {
-            warnings.push(`#${id} blocks itself`);
-          } else if (!target) {
-            warnings.push(`#${targetId} does not exist`);
-          } else if (task.blocks.includes(targetId)) {
-            warnings.push(`cycle: #${id} and #${targetId} block each other`);
-          }
+          if (target && !target.blocks.includes(id)) { target.blocks.push(id); target.updatedAt = Date.now(); }
+          if (targetId === id) warnings.push(`#${id} blocks itself`);
+          else if (!target) warnings.push(`#${targetId} does not exist`);
+          else if (task.blocks.includes(targetId)) warnings.push(`cycle: #${id} and #${targetId} block each other`);
         }
         changedFields.push("blockedBy");
       }
@@ -251,12 +188,23 @@ export class TaskStore {
     });
   }
 
-  /** Delete a task by ID. Returns true if deleted. */
+  /** Complete a task. Called only by /lgtm -- requires pending_approval=true. */
+  complete(id: string): Task {
+    return this.withLock(() => {
+      const task = this.tasks.get(id);
+      if (!task) throw new Error(`Task #${id} not found`);
+      if (task.status === "completed") throw new Error(`Task #${id} already completed`);
+      if (!task.pending_approval) throw new Error(`Task #${id} not ready. Agent must call lgtm_ask first.`);
+      task.status = "completed";
+      task.updatedAt = Date.now();
+      return task;
+    });
+  }
+
   delete(id: string): boolean {
     return this.withLock(() => {
       if (!this.tasks.has(id)) return false;
       this.tasks.delete(id);
-      // Clean up dependency edges
       for (const t of this.tasks.values()) {
         t.blocks = t.blocks.filter(bid => bid !== id);
         t.blockedBy = t.blockedBy.filter(bid => bid !== id);
@@ -265,7 +213,6 @@ export class TaskStore {
     });
   }
 
-  /** Remove all tasks. */
   clearAll(): number {
     return this.withLock(() => {
       const count = this.tasks.size;
@@ -274,24 +221,18 @@ export class TaskStore {
     });
   }
 
-  /** Delete the backing file (if file-backed and empty). */
   deleteFileIfEmpty(): boolean {
     if (!this.filePath || this.tasks.size > 0) return false;
     try { unlinkSync(this.filePath); } catch { /* ignore */ }
     return true;
   }
 
-  /** Remove all completed tasks. */
   clearCompleted(): number {
     return this.withLock(() => {
       let count = 0;
       for (const [id, task] of this.tasks) {
-        if (task.status === "completed") {
-          this.tasks.delete(id);
-          count++;
-        }
+        if (task.status === "completed") { this.tasks.delete(id); count++; }
       }
-      // Clean up dependency edges for deleted tasks
       if (count > 0) {
         const validIds = new Set(this.tasks.keys());
         for (const t of this.tasks.values()) {

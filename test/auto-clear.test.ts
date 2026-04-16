@@ -13,8 +13,9 @@ describe("auto-clear: on_task_complete mode", () => {
   });
 
   it("does not clear completed task before REMINDER_INTERVAL turns", () => {
-    store.create("Task", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Task", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
     // Turns 2, 3, 4 — not enough
@@ -26,8 +27,9 @@ describe("auto-clear: on_task_complete mode", () => {
   });
 
   it("clears completed task after REMINDER_INTERVAL turns", () => {
-    store.create("Task", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Task", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
     // Turn 5 = turn 1 + 4 (REMINDER_INTERVAL)
@@ -37,13 +39,15 @@ describe("auto-clear: on_task_complete mode", () => {
   });
 
   it("clears each task independently based on its own completion turn", () => {
-    store.create("Task A", "Desc");
-    store.create("Task B", "Desc");
+    store.create("Task A", "Desc", "done");
+    store.create("Task B", "Desc", "done");
 
-    store.update("1", { status: "completed" });
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
-    store.update("2", { status: "completed" });
+    store.update("2", { pending_approval: true });
+    store.complete("2");
     manager.trackCompletion("2", 3);
 
     // Turn 5: Task A expires (1+4), Task B still lingers (3+4=7)
@@ -57,11 +61,12 @@ describe("auto-clear: on_task_complete mode", () => {
   });
 
   it("does not clear pending or in_progress tasks", () => {
-    store.create("Pending", "Desc");
-    store.create("In Progress", "Desc");
-    store.create("Completed", "Desc");
+    store.create("Pending", "Desc", "done");
+    store.create("In Progress", "Desc", "done");
+    store.create("Completed", "Desc", "done");
     store.update("2", { status: "in_progress" });
-    store.update("3", { status: "completed" });
+    store.update("3", { pending_approval: true });
+    store.complete("3");
     manager.trackCompletion("3", 1);
 
     manager.onTurnStart(5);
@@ -71,10 +76,11 @@ describe("auto-clear: on_task_complete mode", () => {
   });
 
   it("cleans up dependency edges when auto-clearing", () => {
-    store.create("Blocker", "Desc");
-    store.create("Blocked", "Desc");
+    store.create("Blocker", "Desc", "done");
+    store.create("Blocked", "Desc", "done");
     store.update("1", { addBlocks: ["2"] });
-    store.update("1", { status: "completed" });
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
     manager.onTurnStart(5);
@@ -83,8 +89,9 @@ describe("auto-clear: on_task_complete mode", () => {
   });
 
   it("returns true when tasks are cleared", () => {
-    store.create("Task", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Task", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
     expect(manager.onTurnStart(4)).toBe(false);
@@ -102,9 +109,10 @@ describe("auto-clear: on_list_complete mode", () => {
   });
 
   it("does not clear when some tasks are still pending", () => {
-    store.create("Done", "Desc");
-    store.create("Pending", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Done", "Desc", "done");
+    store.create("Pending", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
     for (let turn = 2; turn <= 10; turn++) {
@@ -115,10 +123,12 @@ describe("auto-clear: on_list_complete mode", () => {
   });
 
   it("does not clear immediately when all tasks complete", () => {
-    store.create("A", "Desc");
-    store.create("B", "Desc");
-    store.update("1", { status: "completed" });
-    store.update("2", { status: "completed" });
+    store.create("A", "Desc", "done");
+    store.create("B", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
+    store.update("2", { pending_approval: true });
+    store.complete("2");
     manager.trackCompletion("2", 1);
 
     // Turns 2-4: not enough
@@ -129,10 +139,12 @@ describe("auto-clear: on_list_complete mode", () => {
   });
 
   it("clears all completed tasks after REMINDER_INTERVAL turns when all are completed", () => {
-    store.create("A", "Desc");
-    store.create("B", "Desc");
-    store.update("1", { status: "completed" });
-    store.update("2", { status: "completed" });
+    store.create("A", "Desc", "done");
+    store.create("B", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
+    store.update("2", { pending_approval: true });
+    store.complete("2");
     manager.trackCompletion("2", 1);
 
     manager.onTurnStart(5);
@@ -140,14 +152,15 @@ describe("auto-clear: on_list_complete mode", () => {
   });
 
   it("resets countdown when a new task is created before REMINDER_INTERVAL", () => {
-    store.create("A", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("A", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
     // Turn 3: new task created — reset countdown
     manager.onTurnStart(3);
     manager.resetBatchCountdown();
-    store.create("B", "Desc");
+    store.create("B", "Desc", "done");
 
     // Turn 5 would have cleared, but countdown was reset at turn 3
     manager.onTurnStart(5);
@@ -155,10 +168,12 @@ describe("auto-clear: on_list_complete mode", () => {
   });
 
   it("resets countdown when a task goes back to in_progress", () => {
-    store.create("A", "Desc");
-    store.create("B", "Desc");
-    store.update("1", { status: "completed" });
-    store.update("2", { status: "completed" });
+    store.create("A", "Desc", "done");
+    store.create("B", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
+    store.update("2", { pending_approval: true });
+    store.complete("2");
     manager.trackCompletion("2", 1);
 
     // Turn 3: task 2 goes back to in_progress
@@ -172,8 +187,9 @@ describe("auto-clear: on_list_complete mode", () => {
   });
 
   it("returns true when tasks are cleared", () => {
-    store.create("Task", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Task", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
     expect(manager.onTurnStart(4)).toBe(false);
@@ -191,10 +207,12 @@ describe("auto-clear: never mode", () => {
   });
 
   it("never clears completed tasks regardless of turns", () => {
-    store.create("A", "Desc");
-    store.create("B", "Desc");
-    store.update("1", { status: "completed" });
-    store.update("2", { status: "completed" });
+    store.create("A", "Desc", "done");
+    store.create("B", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
+    store.update("2", { pending_approval: true });
+    store.complete("2");
     manager.trackCompletion("1", 1);
     manager.trackCompletion("2", 1);
 
@@ -205,8 +223,9 @@ describe("auto-clear: never mode", () => {
   });
 
   it("trackCompletion is a no-op", () => {
-    store.create("Task", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Task", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
     manager.onTurnStart(100);
@@ -220,8 +239,9 @@ describe("auto-clear: dynamic mode switching", () => {
     let mode: AutoClearMode = "never";
     const manager = new AutoClearManager(() => store, () => mode);
 
-    store.create("Task", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Task", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
 
     // Track in never mode — no-op
     manager.trackCompletion("1", 1);
@@ -241,13 +261,14 @@ describe("auto-clear: store getter (session switch)", () => {
     let store = new TaskStore();
     const manager = new AutoClearManager(() => store, () => "on_task_complete");
 
-    store.create("Old task", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Old task", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
     // Simulate session switch — swap store
     store = new TaskStore();
-    store.create("New task", "Desc");
+    store.create("New task", "Desc", "done");
     manager.reset();
 
     // Old task tracking was reset, new store has no completed tasks
@@ -262,8 +283,9 @@ describe("auto-clear: store getter (session switch)", () => {
 
     // Swap to new store with a completed task
     store = new TaskStore();
-    store.create("Task in new store", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Task in new store", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
     manager.onTurnStart(5);
@@ -276,8 +298,9 @@ describe("auto-clear: reset (new session)", () => {
     const store = new TaskStore();
     const manager = new AutoClearManager(() => store, () => "on_task_complete");
 
-    store.create("Task", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Task", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
     // Simulate /new — reset before the delay expires
@@ -292,8 +315,9 @@ describe("auto-clear: reset (new session)", () => {
     const store = new TaskStore();
     const manager = new AutoClearManager(() => store, () => "on_list_complete");
 
-    store.create("Task", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Task", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
 
     // Simulate /new — reset before the delay expires
@@ -308,8 +332,9 @@ describe("auto-clear: reset (new session)", () => {
     const store = new TaskStore();
     const manager = new AutoClearManager(() => store, () => "on_task_complete");
 
-    store.create("Task", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Task", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     manager.trackCompletion("1", 1);
     manager.reset();
 

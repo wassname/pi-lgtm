@@ -8,6 +8,8 @@ export interface Task {
   id: string;
   subject: string;
   description: string;
+  done_criterion: string;      // required: what "done" looks like
+  pending_approval: boolean;   // set by lgtm_ask, required before /lgtm
   status: TaskStatus;
   activeForm?: string;
   owner?: string;
@@ -22,19 +24,4 @@ export interface Task {
 export interface TaskStoreData {
   nextId: number;
   tasks: Task[];
-}
-
-/** Background process associated with a task. */
-export interface BackgroundProcess {
-  taskId: string;
-  pid: number;
-  command?: string;
-  output: string[];
-  status: "running" | "completed" | "error" | "stopped";
-  exitCode?: number;
-  startedAt: number;
-  completedAt?: number;
-  proc: import("node:child_process").ChildProcess;
-  abortController: AbortController;
-  waiters: Array<() => void>;
 }

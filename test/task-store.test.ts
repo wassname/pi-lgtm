@@ -4,6 +4,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TaskStore } from "../src/task-store.js";
 
+// Helper: create a task and set pending_approval so complete() works
+function createAndApprove(store: TaskStore, subject: string) {
+  const task = store.create(subject, "Desc", "done criterion");
+  store.update(task.id, { pending_approval: true });
+  return task;
+}
+
 describe("TaskStore (in-memory)", () => {
   let store: TaskStore;
 
@@ -12,25 +19,27 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("creates tasks with auto-incrementing IDs", () => {
-    const t1 = store.create("First task", "Description 1");
-    const t2 = store.create("Second task", "Description 2");
+    const t1 = store.create("First task", "Description 1", "criterion 1");
+    const t2 = store.create("Second task", "Description 2", "criterion 2");
 
     expect(t1.id).toBe("1");
     expect(t2.id).toBe("2");
     expect(t1.status).toBe("pending");
     expect(t1.subject).toBe("First task");
     expect(t1.description).toBe("Description 1");
+    expect(t1.done_criterion).toBe("criterion 1");
+    expect(t1.pending_approval).toBe(false);
   });
 
   it("creates tasks with optional fields", () => {
-    const t = store.create("Task", "Desc", "Running task", { key: "value" });
+    const t = store.create("Task", "Desc", "done criterion", "Running task", { key: "value" });
 
     expect(t.activeForm).toBe("Running task");
     expect(t.metadata).toEqual({ key: "value" });
   });
 
   it("gets a task by ID", () => {
-    store.create("Test", "Desc");
+    store.create("Test", "Desc", "done");
     const task = store.get("1");
 
     expect(task).toBeDefined();
@@ -42,16 +51,16 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("lists all tasks sorted by ID", () => {
-    store.create("Task 3", "Desc");
-    store.create("Task 1", "Desc");
-    store.create("Task 2", "Desc");
+    store.create("Task 3", "Desc", "done");
+    store.create("Task 1", "Desc", "done");
+    store.create("Task 2", "Desc", "done");
 
     const tasks = store.list();
     expect(tasks.map(t => t.id)).toEqual(["1", "2", "3"]);
   });
 
   it("updates task status", () => {
-    store.create("Test", "Desc");
+    store.create("Test", "Desc", "done");
     const { task, changedFields } = store.update("1", { status: "in_progress" });
 
     expect(task!.status).toBe("in_progress");
@@ -59,7 +68,7 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("updates multiple fields at once", () => {
-    store.create("Test", "Desc");
+    store.create("Test", "Desc", "done");
     const { changedFields } = store.update("1", {
       subject: "Updated subject",
       description: "Updated desc",
@@ -76,7 +85,7 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("deletes a task with status: deleted", () => {
-    store.create("Test", "Desc");
+    store.create("Test", "Desc", "done");
     const { changedFields } = store.update("1", { status: "deleted" });
 
     expect(changedFields).toEqual(["deleted"]);
@@ -85,16 +94,16 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("preserves ID counter after deletion", () => {
-    store.create("Task 1", "Desc");
-    store.create("Task 2", "Desc");
+    store.create("Task 1", "Desc", "done");
+    store.create("Task 2", "Desc", "done");
     store.update("1", { status: "deleted" });
 
-    const t3 = store.create("Task 3", "Desc");
+    const t3 = store.create("Task 3", "Desc", "done");
     expect(t3.id).toBe("3"); // Not "1" — counter continues
   });
 
   it("merges metadata with null key deletion", () => {
-    store.create("Test", "Desc", undefined, { a: 1, b: 2, c: 3 });
+    store.create("Test", "Desc", "done", undefined, { a: 1, b: 2, c: 3 });
     store.update("1", { metadata: { b: null, d: 4 } });
 
     const task = store.get("1")!;
@@ -102,8 +111,8 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("sets up bidirectional blocks via addBlocks", () => {
-    store.create("Blocker", "Desc");
-    store.create("Blocked", "Desc");
+    store.create("Blocker", "Desc", "done");
+    store.create("Blocked", "Desc", "done");
 
     store.update("1", { addBlocks: ["2"] });
 
@@ -114,8 +123,8 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("sets up bidirectional blocks via addBlockedBy", () => {
-    store.create("Blocker", "Desc");
-    store.create("Blocked", "Desc");
+    store.create("Blocker", "Desc", "done");
+    store.create("Blocked", "Desc", "done");
 
     store.update("2", { addBlockedBy: ["1"] });
 
@@ -126,8 +135,8 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("does not duplicate dependency edges", () => {
-    store.create("A", "Desc");
-    store.create("B", "Desc");
+    store.create("A", "Desc", "done");
+    store.create("B", "Desc", "done");
 
     store.update("1", { addBlocks: ["2"] });
     store.update("1", { addBlocks: ["2"] }); // duplicate
@@ -137,8 +146,8 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("cleans up dependency edges on deletion", () => {
-    store.create("A", "Desc");
-    store.create("B", "Desc");
+    store.create("A", "Desc", "done");
+    store.create("B", "Desc", "done");
     store.update("1", { addBlocks: ["2"] });
 
     store.update("1", { status: "deleted" });
@@ -148,9 +157,9 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("clears completed tasks", () => {
-    store.create("Completed", "Desc");
-    store.create("Pending", "Desc");
-    store.update("1", { status: "completed" });
+    createAndApprove(store, "Completed");
+    store.create("Pending", "Desc", "done");
+    store.complete("1");
 
     const count = store.clearCompleted();
 
@@ -159,21 +168,41 @@ describe("TaskStore (in-memory)", () => {
     expect(store.list()[0].id).toBe("2");
   });
 
+  it("throws on update status=completed (must use /lgtm)", () => {
+    store.create("Test", "Desc", "done");
+    expect(() => store.update("1", { status: "completed" as any })).toThrow("Use /lgtm");
+  });
+
   it("returns not found for update on non-existent task", () => {
-    const { task, changedFields } = store.update("999", { status: "completed" });
+    const { task, changedFields } = store.update("999", { status: "in_progress" });
     expect(task).toBeUndefined();
     expect(changedFields).toEqual([]);
   });
 
+  it("complete() requires pending_approval", () => {
+    store.create("Test", "Desc", "done");
+    expect(() => store.complete("1")).toThrow("lgtm_ask");
+  });
+
+  it("complete() works when pending_approval=true", () => {
+    createAndApprove(store, "Test");
+    const task = store.complete("1");
+    expect(task.status).toBe("completed");
+  });
+
+  it("complete() throws on non-existent task", () => {
+    expect(() => store.complete("999")).toThrow("not found");
+  });
+
   it("delete method works", () => {
-    store.create("Test", "Desc");
+    store.create("Test", "Desc", "done");
     expect(store.delete("1")).toBe(true);
     expect(store.delete("1")).toBe(false); // already deleted
     expect(store.list()).toHaveLength(0);
   });
 
   it("creates tasks with metadata via TaskCreate", () => {
-    const t = store.create("With meta", "Desc", undefined, { pr: "123", reviewer: "alice" });
+    const t = store.create("With meta", "Desc", "done", undefined, { pr: "123", reviewer: "alice" });
     expect(t.metadata).toEqual({ pr: "123", reviewer: "alice" });
 
     const retrieved = store.get("1")!;
@@ -181,8 +210,8 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("allows circular dependencies with warning", () => {
-    store.create("A", "Desc");
-    store.create("B", "Desc");
+    store.create("A", "Desc", "done");
+    store.create("B", "Desc", "done");
     store.update("1", { addBlocks: ["2"] });
     const { warnings } = store.update("2", { addBlocks: ["1"] });
 
@@ -192,57 +221,67 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("allows self-dependency with warning", () => {
-    store.create("Self", "Desc");
+    store.create("Self", "Desc", "done");
     const { warnings } = store.update("1", { addBlocks: ["1"] });
     expect(store.get("1")!.blocks).toContain("1");
     expect(warnings).toContain("#1 blocks itself");
   });
 
   it("stores dangling edge IDs with warning", () => {
-    store.create("Real", "Desc");
+    store.create("Real", "Desc", "done");
     const { warnings } = store.update("1", { addBlocks: ["9999"] });
     expect(store.get("1")!.blocks).toContain("9999");
     expect(warnings).toContain("#9999 does not exist");
   });
 
   it("returns no warnings for valid dependencies", () => {
-    store.create("A", "Desc");
-    store.create("B", "Desc");
+    store.create("A", "Desc", "done");
+    store.create("B", "Desc", "done");
     const { warnings } = store.update("1", { addBlocks: ["2"] });
     expect(warnings).toEqual([]);
   });
 
   it("accepts whitespace-only subjects (matches Claude Code)", () => {
-    const t = store.create("   ", "Desc");
+    const t = store.create("   ", "Desc", "done");
     expect(t.subject).toBe("   ");
   });
 
   it("updates activeForm field", () => {
-    store.create("Test", "Desc");
+    store.create("Test", "Desc", "done");
     const { changedFields } = store.update("1", { activeForm: "Running tests" });
     expect(changedFields).toContain("activeForm");
     expect(store.get("1")!.activeForm).toBe("Running tests");
   });
 
   it("updates description field", () => {
-    store.create("Test", "Original desc");
+    store.create("Test", "Original desc", "done");
     const { changedFields } = store.update("1", { description: "Updated desc" });
     expect(changedFields).toContain("description");
     expect(store.get("1")!.description).toBe("Updated desc");
   });
 
+  it("updates done_criterion field", () => {
+    store.create("Test", "Desc", "original criterion");
+    const { changedFields } = store.update("1", { done_criterion: "updated criterion" });
+    expect(changedFields).toContain("done_criterion");
+    expect(store.get("1")!.done_criterion).toBe("updated criterion");
+  });
+
   it("returns empty changedFields when updating non-existent task", () => {
-    const { task, changedFields, warnings } = store.update("999", { status: "completed" });
+    const { task, changedFields, warnings } = store.update("999", { status: "in_progress" });
     expect(task).toBeUndefined();
     expect(changedFields).toEqual([]);
     expect(warnings).toEqual([]);
   });
 
   it("clearCompleted cleans up dependency edges", () => {
-    store.create("Blocker", "Desc");
-    store.create("Blocked", "Desc");
+    store.create("Blocker", "Desc", "done");
+    store.create("Blocked", "Desc", "done");
     store.update("1", { addBlocks: ["2"] });
-    store.update("1", { status: "completed" });
+    createAndApprove(store, "dummy"); // need task 1 to have pending_approval
+    // Actually set pending_approval on task 1
+    store.update("1", { pending_approval: true });
+    store.complete("1");
 
     store.clearCompleted();
 
@@ -251,9 +290,9 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("handles multiple addBlocks in one call", () => {
-    store.create("Blocker", "Desc");
-    store.create("B1", "Desc");
-    store.create("B2", "Desc");
+    store.create("Blocker", "Desc", "done");
+    store.create("B1", "Desc", "done");
+    store.create("B2", "Desc", "done");
 
     store.update("1", { addBlocks: ["2", "3"] });
 
@@ -263,44 +302,42 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("addBlockedBy warns on self-dependency", () => {
-    store.create("Self", "Desc");
+    store.create("Self", "Desc", "done");
     const { warnings } = store.update("1", { addBlockedBy: ["1"] });
     expect(store.get("1")!.blockedBy).toContain("1");
     expect(warnings).toContain("#1 blocks itself");
   });
 
   it("addBlockedBy warns on dangling ref", () => {
-    store.create("Real", "Desc");
+    store.create("Real", "Desc", "done");
     const { warnings } = store.update("1", { addBlockedBy: ["9999"] });
     expect(store.get("1")!.blockedBy).toContain("9999");
     expect(warnings).toContain("#9999 does not exist");
   });
 
   it("addBlockedBy warns on cycle", () => {
-    store.create("A", "Desc");
-    store.create("B", "Desc");
+    store.create("A", "Desc", "done");
+    store.create("B", "Desc", "done");
     store.update("1", { addBlocks: ["2"] });
     const { warnings } = store.update("1", { addBlockedBy: ["2"] });
     expect(warnings).toContain("cycle: #1 and #2 block each other");
   });
 
   it("clearCompleted returns 0 when no completed tasks", () => {
-    store.create("Pending", "Desc");
+    store.create("Pending", "Desc", "done");
     expect(store.clearCompleted()).toBe(0);
   });
 
   it("list sorts pending → in_progress → completed with all three present", () => {
-    store.create("Pending task", "Desc");
-    store.create("Completed task", "Desc");
-    store.create("In-progress task", "Desc");
-    store.create("Another pending", "Desc");
+    store.create("Pending task", "Desc", "done");
+    createAndApprove(store, "Completed task");
+    store.create("In-progress task", "Desc", "done");
+    store.create("Another pending", "Desc", "done");
 
-    store.update("2", { status: "completed" });
+    store.complete("2");
     store.update("3", { status: "in_progress" });
 
     const tasks = store.list();
-    // Store returns by ID; TaskList tool sorts by status group
-    // Here we verify the raw list order (by ID), then test status-grouped sort
     const statusOrder: Record<string, number> = { pending: 0, in_progress: 1, completed: 2 };
     const sorted = [...tasks].sort((a, b) => {
       const so = (statusOrder[a.status] ?? 0) - (statusOrder[b.status] ?? 0);
@@ -319,7 +356,6 @@ describe("TaskStore (file-backed)", () => {
   const filePath = join(tasksDir, `${testListId}.json`);
 
   afterEach(() => {
-    // Clean up test file
     try { rmSync(filePath); } catch { /* */ }
     try { rmSync(filePath + ".lock"); } catch { /* */ }
     try { rmSync(filePath + ".tmp"); } catch { /* */ }
@@ -327,9 +363,8 @@ describe("TaskStore (file-backed)", () => {
 
   it("persists tasks to disk", () => {
     const store1 = new TaskStore(testListId);
-    store1.create("Persistent task", "Should survive reload");
+    store1.create("Persistent task", "Should survive reload", "done");
 
-    // Create a new store instance pointing to same file
     const store2 = new TaskStore(testListId);
     const tasks = store2.list();
 
@@ -339,7 +374,7 @@ describe("TaskStore (file-backed)", () => {
 
   it("persists in_progress updates to disk", () => {
     const store1 = new TaskStore(testListId);
-    store1.create("Task", "Desc");
+    store1.create("Task", "Desc", "done");
     store1.update("1", { status: "in_progress" });
 
     const store2 = new TaskStore(testListId);
@@ -348,9 +383,10 @@ describe("TaskStore (file-backed)", () => {
 
   it("persists completed tasks to disk", () => {
     const store1 = new TaskStore(testListId);
-    store1.create("Done task", "Desc");
-    store1.create("Pending task", "Desc");
-    store1.update("1", { status: "completed" });
+    store1.create("Done task", "Desc", "done");
+    store1.create("Pending task", "Desc", "done");
+    store1.update("1", { pending_approval: true });
+    store1.complete("1");
 
     const store2 = new TaskStore(testListId);
     expect(store2.get("1")).toBeDefined();
@@ -361,11 +397,12 @@ describe("TaskStore (file-backed)", () => {
 
   it("restores all tasks across instances", () => {
     const store1 = new TaskStore(testListId);
-    store1.create("Pending", "Desc");
-    store1.create("In progress", "Desc");
-    store1.create("Done", "Desc");
+    store1.create("Pending", "Desc", "done");
+    store1.create("In progress", "Desc", "done");
+    store1.create("Done", "Desc", "done");
     store1.update("2", { status: "in_progress" });
-    store1.update("3", { status: "completed" });
+    store1.update("3", { pending_approval: true });
+    store1.complete("3");
 
     const store2 = new TaskStore(testListId);
     const tasks = store2.list();
@@ -377,11 +414,11 @@ describe("TaskStore (file-backed)", () => {
 
   it("persists ID counter across instances", () => {
     const store1 = new TaskStore(testListId);
-    store1.create("Task 1", "Desc");
-    store1.create("Task 2", "Desc");
+    store1.create("Task 1", "Desc", "done");
+    store1.create("Task 2", "Desc", "done");
 
     const store2 = new TaskStore(testListId);
-    const t3 = store2.create("Task 3", "Desc");
+    const t3 = store2.create("Task 3", "Desc", "done");
     expect(t3.id).toBe("3");
   });
 });
@@ -397,7 +434,7 @@ describe("TaskStore (absolute path)", () => {
 
   it("accepts absolute path and persists tasks", () => {
     const store1 = new TaskStore(absFilePath);
-    store1.create("Abs path task", "Desc");
+    store1.create("Abs path task", "Desc", "done");
 
     const store2 = new TaskStore(absFilePath);
     expect(store2.list()).toHaveLength(1);
@@ -406,9 +443,10 @@ describe("TaskStore (absolute path)", () => {
 
   it("persists completed tasks when using absolute path", () => {
     const store1 = new TaskStore(absFilePath);
-    store1.create("Pending", "Desc");
-    store1.create("Completed", "Desc");
-    store1.update("2", { status: "completed" });
+    store1.create("Pending", "Desc", "done");
+    store1.create("Completed", "Desc", "done");
+    store1.update("2", { pending_approval: true });
+    store1.complete("2");
 
     const raw = JSON.parse(readFileSync(absFilePath, "utf-8"));
     expect(raw.tasks).toHaveLength(2);

@@ -68,7 +68,7 @@ describe("TaskWidget", () => {
   });
 
   it("renders pending tasks with ◻ icon", () => {
-    store.create("Do something", "Desc");
+    store.create("Do something", "Desc", "done");
     widget.update();
 
     const lines = renderWidget(ui.state);
@@ -80,7 +80,7 @@ describe("TaskWidget", () => {
   });
 
   it("renders in-progress tasks with ◼ icon", () => {
-    store.create("Working on it", "Desc");
+    store.create("Working on it", "Desc", "done");
     store.update("1", { status: "in_progress" });
     widget.update();
 
@@ -90,8 +90,9 @@ describe("TaskWidget", () => {
   });
 
   it("renders completed tasks with ✔ icon and strikethrough", () => {
-    store.create("Done task", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Done task", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     widget.update();
 
     const lines = renderWidget(ui.state);
@@ -100,7 +101,7 @@ describe("TaskWidget", () => {
   });
 
   it("renders active tasks with spinner icon", () => {
-    store.create("Running thing", "Desc", "Processing data");
+    store.create("Running thing", "Desc", "done criterion", "Processing data");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
@@ -112,8 +113,8 @@ describe("TaskWidget", () => {
   });
 
   it("shows blocked-by info for pending tasks", () => {
-    store.create("Blocker", "Desc");
-    store.create("Blocked", "Desc");
+    store.create("Blocker", "Desc", "done");
+    store.create("Blocked", "Desc", "done");
     store.update("2", { addBlockedBy: ["1"] });
     widget.update();
 
@@ -123,10 +124,11 @@ describe("TaskWidget", () => {
   });
 
   it("hides completed blockers in blocked-by suffix", () => {
-    store.create("Blocker", "Desc");
-    store.create("Blocked", "Desc");
+    store.create("Blocker", "Desc", "done");
+    store.create("Blocked", "Desc", "done");
     store.update("2", { addBlockedBy: ["1"] });
-    store.update("1", { status: "completed" });
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     widget.update();
 
     const lines = renderWidget(ui.state);
@@ -135,10 +137,11 @@ describe("TaskWidget", () => {
   });
 
   it("shows status summary in header", () => {
-    store.create("Task A", "Desc");
-    store.create("Task B", "Desc");
-    store.create("Task C", "Desc");
-    store.update("1", { status: "completed" });
+    store.create("Task A", "Desc", "done");
+    store.create("Task B", "Desc", "done");
+    store.create("Task C", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     store.update("2", { status: "in_progress" });
     widget.update();
 
@@ -150,7 +153,7 @@ describe("TaskWidget", () => {
   });
 
   it("clears widget when all tasks are deleted", () => {
-    store.create("Task", "Desc");
+    store.create("Task", "Desc", "done");
     widget.update();
     expect(ui.state.widgets.get("tasks")?.content).toBeDefined();
 
@@ -172,7 +175,7 @@ describe("TaskWidget", () => {
   });
 
   it("tracks token usage for active tasks", () => {
-    store.create("Active task", "Desc", "Running");
+    store.create("Active task", "Desc", "done criterion", "Running");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
@@ -186,7 +189,7 @@ describe("TaskWidget", () => {
   });
 
   it("deactivates a task with setActiveTask(id, false)", () => {
-    store.create("Task", "Desc", "Doing work");
+    store.create("Task", "Desc", "done criterion", "Doing work");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
@@ -202,12 +205,13 @@ describe("TaskWidget", () => {
   });
 
   it("prunes stale active IDs on update", () => {
-    store.create("Task", "Desc");
+    store.create("Task", "Desc", "done");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
     // Complete the task externally
-    store.update("1", { status: "completed" });
+    store.update("1", { pending_approval: true });
+    store.complete("1");
     widget.update();
 
     // Should render as completed, not active
@@ -217,8 +221,8 @@ describe("TaskWidget", () => {
   });
 
   it("supports multiple active tasks simultaneously", () => {
-    store.create("Task A", "Desc", "Processing A");
-    store.create("Task B", "Desc", "Processing B");
+    store.create("Task A", "Desc", "done criterion", "Processing A");
+    store.create("Task B", "Desc", "done criterion", "Processing B");
     store.update("1", { status: "in_progress" });
     store.update("2", { status: "in_progress" });
     widget.setActiveTask("1", true);
@@ -230,8 +234,8 @@ describe("TaskWidget", () => {
   });
 
   it("distributes token usage across all active tasks", () => {
-    store.create("Task A", "Desc", "A");
-    store.create("Task B", "Desc", "B");
+    store.create("Task A", "Desc", "done criterion", "A");
+    store.create("Task B", "Desc", "done criterion", "B");
     store.update("1", { status: "in_progress" });
     store.update("2", { status: "in_progress" });
     widget.setActiveTask("1", true);
@@ -246,7 +250,7 @@ describe("TaskWidget", () => {
   });
 
   it("dispose clears widget and timer", () => {
-    store.create("Task", "Desc");
+    store.create("Task", "Desc", "done");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
@@ -255,7 +259,7 @@ describe("TaskWidget", () => {
   });
 
   it("uses subject as fallback when no activeForm", () => {
-    store.create("My Subject", "Desc");
+    store.create("My Subject", "Desc", "done");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
@@ -264,7 +268,7 @@ describe("TaskWidget", () => {
   });
 
   it("shows elapsed time but no token arrows when tokens are zero", () => {
-    store.create("No tokens", "Desc", "Working");
+    store.create("No tokens", "Desc", "done criterion", "Working");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
@@ -280,7 +284,7 @@ describe("TaskWidget", () => {
   });
 
   it("cleans up metrics when stale active IDs are pruned", () => {
-    store.create("Task", "Desc", "Running");
+    store.create("Task", "Desc", "done criterion", "Running");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
     widget.addTokenUsage(100, 50);
@@ -290,7 +294,7 @@ describe("TaskWidget", () => {
     widget.update();
 
     // Reactivate with same ID (new task) — should get fresh metrics
-    store.create("Task 2", "Desc", "Running");  // ID 2
+    store.create("Task 2", "Desc", "done criterion", "Running");  // ID 2
     store.update("2", { status: "in_progress" });
     widget.setActiveTask("2", true);
 
@@ -300,7 +304,7 @@ describe("TaskWidget", () => {
   });
 
   it("indents task lines under header", () => {
-    store.create("Indented task", "Desc");
+    store.create("Indented task", "Desc", "done");
     widget.update();
 
     const lines = renderWidget(ui.state);
@@ -309,7 +313,7 @@ describe("TaskWidget", () => {
   });
 
   it("widget is placed aboveEditor", () => {
-    store.create("Task", "Desc");
+    store.create("Task", "Desc", "done");
     widget.update();
 
     const entry = ui.state.widgets.get("tasks");
@@ -336,7 +340,7 @@ describe("formatDuration (via widget rendering)", () => {
   });
 
   it("shows seconds for short durations", () => {
-    store.create("Quick", "Desc", "Working");
+    store.create("Quick", "Desc", "done criterion", "Working");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
@@ -348,7 +352,7 @@ describe("formatDuration (via widget rendering)", () => {
   });
 
   it("shows hours for long durations", () => {
-    store.create("Long", "Desc", "Working");
+    store.create("Long", "Desc", "done criterion", "Working");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
@@ -360,7 +364,7 @@ describe("formatDuration (via widget rendering)", () => {
   });
 
   it("shows exact hours without minutes", () => {
-    store.create("Exact", "Desc", "Working");
+    store.create("Exact", "Desc", "done criterion", "Working");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
@@ -372,7 +376,7 @@ describe("formatDuration (via widget rendering)", () => {
   });
 
   it("shows minutes and seconds", () => {
-    store.create("Medium", "Desc", "Working");
+    store.create("Medium", "Desc", "done criterion", "Working");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
@@ -384,7 +388,7 @@ describe("formatDuration (via widget rendering)", () => {
   });
 
   it("formats small token counts without k suffix", () => {
-    store.create("Small", "Desc", "Working");
+    store.create("Small", "Desc", "done criterion", "Working");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
@@ -397,7 +401,7 @@ describe("formatDuration (via widget rendering)", () => {
   });
 
   it("formats token counts with k suffix and removes .0", () => {
-    store.create("Large", "Desc", "Working");
+    store.create("Large", "Desc", "done criterion", "Working");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
 
