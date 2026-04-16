@@ -338,16 +338,16 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
 
 - **evidence**: Auditable proof — command output, table, file path, link
 - **failure_mode_1**: Most likely way this could be wrong despite evidence
-- **failure_mode_2**: Second most likely failure mode
-- **evidence_vs_failures**: How would evidence look different if failure modes were true?
+- **failure_mode_2**: Most subtle/perverse failure -- silent fail, null hypothesis, or one that your evidence would NOT distinguish from success
+- **falsification_test**: Concrete command that would falsify your claim. Include: exact command, expected output if claim is true, expected output if a failure mode is real, and why this test can't accidentally pass under the failure. Think especially about: null hypothesis (feature isn't active at all), silent failures (error swallowed, fallback triggered silently), and tests that pass in test env but would fail in prod.
 - **evidence_files** (optional): File paths human should inspect -- must exist
 - **remaining_uncertainty** (optional): What's NOT tested, known limitations, deferred edge cases`,
     parameters: Type.Object({
       taskId: Type.String({ description: "Task ID to submit for sign-off" }),
       evidence: Type.String({ description: "Auditable proof with full reproducibility: exact command run and its output, commit hash, config/seeds used, output file paths. Must be re-runnable by the human. 'I wrote X' is not evidence -- 'I ran X and got Y' is. Include counts, snippets, test output." }),
       failure_mode_1: Type.String({ description: "Most likely way this could be wrong despite evidence" }),
-      failure_mode_2: Type.String({ description: "Second most likely failure mode" }),
-      evidence_vs_failures: Type.String({ description: "How would evidence differ if failure modes were true?" }),
+      failure_mode_2: Type.String({ description: "Most subtle or hard-to-distinguish failure: silent fail, null hypothesis (feature not active at all), or a bug your evidence would NOT distinguish from correct behavior" }),
+      falsification_test: Type.String({ description: "Exact command + expected output when claim is TRUE vs when a failure mode is real. Explain why the test can't accidentally pass under the failure. Cover at least: null hypothesis (feature not active), silent fail (error swallowed/fallback triggered), and env mismatch (passes in test, broken in prod)." }),
       evidence_files: Type.Optional(Type.Array(Type.String(), { description: "File paths to inspect (must exist)" })),
       remaining_uncertainty: Type.Optional(Type.String({ description: "What's NOT tested, known limitations, edge cases deferred. Be honest about scope boundaries." })),
     }),
@@ -369,7 +369,7 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
           lgtm_evidence: params.evidence,
           lgtm_failure_mode_1: params.failure_mode_1,
           lgtm_failure_mode_2: params.failure_mode_2,
-          lgtm_evidence_vs_failures: params.evidence_vs_failures,
+          lgtm_falsification_test: params.falsification_test,
           lgtm_evidence_files: params.evidence_files ?? [],
           lgtm_remaining_uncertainty: params.remaining_uncertainty ?? "",
           lgtm_submitted_at: new Date().toISOString(),
@@ -390,7 +390,7 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
         `### Evidence\n${params.evidence}\n\n` +
         `### Failure mode 1\n${params.failure_mode_1}\n\n` +
         `### Failure mode 2\n${params.failure_mode_2}\n\n` +
-        `### Evidence vs failure modes\n${params.evidence_vs_failures}` +
+        `### Falsification test\n${params.falsification_test}` +
         filesSection +
         uncertaintySection +
         `\n\n---\n` +
@@ -482,8 +482,9 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
         let evidenceNote = "";
         if (em.lgtm_evidence) {
           const parts = [`\n\nEvidence (${em.lgtm_submitted_at ?? "?"}):\n${em.lgtm_evidence}`];
-          parts.push(`FM1: ${em.lgtm_failure_mode_1}`);
-          parts.push(`FM2: ${em.lgtm_failure_mode_2}`);
+          parts.push(`FM1 (likely): ${em.lgtm_failure_mode_1}`);
+          parts.push(`FM2 (subtle/silent): ${em.lgtm_failure_mode_2}`);
+          if (em.lgtm_falsification_test) parts.push(`Falsification test: ${em.lgtm_falsification_test}`);
           if (em.lgtm_remaining_uncertainty) parts.push(`Uncertainty: ${em.lgtm_remaining_uncertainty}`);
           if (em.lgtm_evidence_files?.length) parts.push(`Files: ${em.lgtm_evidence_files.join(", ")}`);
           evidenceNote = parts.join("\n");
@@ -540,9 +541,9 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
     const evidenceParts: string[] = [];
     if (m.lgtm_evidence) {
       evidenceParts.push(`Evidence:\n${m.lgtm_evidence}`);
-      evidenceParts.push(`FM1: ${m.lgtm_failure_mode_1}`);
-      evidenceParts.push(`FM2: ${m.lgtm_failure_mode_2}`);
-      evidenceParts.push(`Evidence vs failures: ${m.lgtm_evidence_vs_failures}`);
+      evidenceParts.push(`FM1 (likely): ${m.lgtm_failure_mode_1}`);
+      evidenceParts.push(`FM2 (subtle/silent): ${m.lgtm_failure_mode_2}`);
+      if (m.lgtm_falsification_test) evidenceParts.push(`Falsification test: ${m.lgtm_falsification_test}`);
       if (m.lgtm_remaining_uncertainty) evidenceParts.push(`Remaining uncertainty: ${m.lgtm_remaining_uncertainty}`);
       if (m.lgtm_evidence_files?.length) evidenceParts.push(`Files: ${m.lgtm_evidence_files.join(", ")}`);
       evidenceParts.push(`Submitted: ${m.lgtm_submitted_at}`);
