@@ -132,7 +132,7 @@ export class TaskWidget {
     if (completed.length > 0) parts.push(`${completed.length} done`);
     if (inProgress.length > 0) parts.push(`${inProgress.length} in progress`);
     if (pending.length > 0) parts.push(`${pending.length} open`);
-    const statusText = `${tasks.length} lgtm?'s (${parts.join(", ")})`;
+    const statusText = `${tasks.length} lgtm's (${parts.join(", ")})`;
 
     const spinnerChar = SPINNER[this.widgetFrame % SPINNER.length];
     const lines: string[] = [truncate(theme.fg("accent", "●") + " " + theme.fg("accent", statusText))];
