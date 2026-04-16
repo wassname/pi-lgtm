@@ -5,7 +5,7 @@
  *   ✔ completed tasks (strikethrough + dim)
  *   ◼ in_progress tasks
  *   ◻ pending tasks
- *   ✳/✽ actively executing task (star spinner with activeForm text)
+ *   ✳/✽ actively executing task (star spinner with progress_label text)
  */
 
 import { truncateToWidth } from "@mariozechner/pi-tui";
@@ -31,7 +31,7 @@ export type UICtx = {
 /** Star spinner frames for animated active task indicator (matches Claude Code). */
 const SPINNER = ["✳", "✴", "✵", "✶", "✷", "✸", "✹", "✺", "✻", "✼", "✽"];
 
-const MAX_VISIBLE_TASKS = 10;
+const MAX_VISIBLE_TASKS = 5;
 
 /** Per-task runtime metrics (elapsed time, token usage). */
 export interface TaskMetrics {
@@ -166,7 +166,7 @@ export class TaskWidget {
 
       let text: string;
       if (isActive) {
-        const form = task.activeForm || task.subject;
+        const form = task.progress_label || task.subject;
         const agentId = task.metadata?.agentId;
         const agentLabel = agentId ? ` (agent ${agentId.slice(0, 5)})` : "";
         const m = this.metrics.get(task.id);

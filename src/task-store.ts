@@ -83,7 +83,7 @@ export class TaskStore {
     finally { releaseLock(this.lockPath); }
   }
 
-  create(subject: string, description: string, done_criterion: string, activeForm?: string, metadata?: Record<string, any>): Task {
+  create(subject: string, description: string, done_criterion: string, progress_label?: string, metadata?: Record<string, any>): Task {
     return this.withLock(() => {
       const now = Date.now();
       const task: Task = {
@@ -91,7 +91,7 @@ export class TaskStore {
         subject, description, done_criterion,
         pending_approval: false,
         status: "pending",
-        activeForm, owner: undefined,
+        progress_label,
         metadata: metadata ?? {},
         blocks: [], blockedBy: [],
         createdAt: now, updatedAt: now,
@@ -117,11 +117,10 @@ export class TaskStore {
     description?: string;
     done_criterion?: string;
     pending_approval?: boolean;
-    activeForm?: string;
-    owner?: string;
+    progress_label?: string;
     metadata?: Record<string, any>;
-    addBlocks?: string[];
-    addBlockedBy?: string[];
+    add_blocks?: string[];
+    add_blocked_by?: string[];
   }): { task: Task | undefined; changedFields: string[]; warnings: string[] } {
     return this.withLock(() => {
       const task = this.tasks.get(id);
@@ -148,8 +147,7 @@ export class TaskStore {
       if (fields.description !== undefined) { task.description = fields.description; changedFields.push("description"); }
       if (fields.done_criterion !== undefined) { task.done_criterion = fields.done_criterion; changedFields.push("done_criterion"); }
       if (fields.pending_approval !== undefined) { task.pending_approval = fields.pending_approval; changedFields.push("pending_approval"); }
-      if (fields.activeForm !== undefined) { task.activeForm = fields.activeForm; changedFields.push("activeForm"); }
-      if (fields.owner !== undefined) { task.owner = fields.owner; changedFields.push("owner"); }
+      if (fields.progress_label !== undefined) { task.progress_label = fields.progress_label; changedFields.push("progress_label"); }
 
       if (fields.metadata !== undefined) {
         for (const [key, value] of Object.entries(fields.metadata)) {
@@ -159,8 +157,8 @@ export class TaskStore {
         changedFields.push("metadata");
       }
 
-      if (fields.addBlocks?.length) {
-        for (const targetId of fields.addBlocks) {
+      if (fields.add_blocks?.length) {
+        for (const targetId of fields.add_blocks) {
           if (!task.blocks.includes(targetId)) task.blocks.push(targetId);
           const target = this.tasks.get(targetId);
           if (target && !target.blockedBy.includes(id)) { target.blockedBy.push(id); target.updatedAt = Date.now(); }
@@ -171,8 +169,8 @@ export class TaskStore {
         changedFields.push("blocks");
       }
 
-      if (fields.addBlockedBy?.length) {
-        for (const targetId of fields.addBlockedBy) {
+      if (fields.add_blocked_by?.length) {
+        for (const targetId of fields.add_blocked_by) {
           if (!task.blockedBy.includes(targetId)) task.blockedBy.push(targetId);
           const target = this.tasks.get(targetId);
           if (target && !target.blocks.includes(id)) { target.blocks.push(id); target.updatedAt = Date.now(); }

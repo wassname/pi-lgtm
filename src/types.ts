@@ -11,8 +11,7 @@ export interface Task {
   done_criterion: string;      // required: what "done" looks like
   pending_approval: boolean;   // set by lgtm_ask, required before /lgtm
   status: TaskStatus;
-  activeForm?: string;
-  owner?: string;
+  progress_label?: string;
   metadata: Record<string, any>;
   blocks: string[];
   blockedBy: string[];

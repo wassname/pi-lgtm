@@ -25,7 +25,7 @@ pi -e ./src/index.ts
 | pi-tasks | pi-lgtm |
 |---|---|
 | Agent calls `TaskUpdate { status: "completed" }` | Blocked -- throws error |
-| No evidence required | `lgtm_ask` requires evidence, 2 failure modes, evidence vs failures |
+| No evidence required | `lgtm_ask` requires evidence, 2 failure modes, falsification test |
 | Tasks complete immediately | Agent sets `pending_approval`, human runs `/lgtm <id>` |
 | No done criterion | `done_criterion` required on create: falsifiable observation |
 
@@ -47,7 +47,7 @@ Stripped: `TaskExecute`, `TaskOutput`, `TaskStop`, `process-tracker.ts`, subagen
 ### `TaskCreate`
 
 ```
-subject, description, done_criterion (required), activeForm (optional)
+subject, description, done_criterion (required), progress_label (optional)
 ```
 
 `done_criterion` must be a falsifiable observation: what you expect to see AND what you would see if it is wrong. Example: `"All 92 tests pass. If wrong: type errors in build or failures in task-store.test.ts."`
@@ -72,10 +72,10 @@ The epistemic gate. Required fields:
 |---|---|
 | `taskId` | Task to submit |
 | `evidence` | Exact command run + output, commit hash, config/seeds, file paths. "I ran X and got Y" not "I wrote X". |
-| `failure_mode_1` | Most likely way this is wrong despite evidence |
-| `failure_mode_2` | Second most likely failure mode |
-| `evidence_vs_failures` | How would evidence look different if FM1 or FM2 were true? |
-| `evidence_files` | Optional file paths to inspect (validated: must exist) |
+| `failure_likely` | Most likely way this is wrong despite evidence |
+| `failure_sneaky` | Perverse/silent failure that looks like success superficially |
+| `falsification_test` | What you ran and what you got, so both you and the human can sanity-check it. Why that result could not occur if a failure mode were real. |
+| `verification_hints` | Where to look and what to check. Descriptions of evidence locations. |
 | `remaining_uncertainty` | What is NOT tested, deferred edge cases, known limitations |
 
 After calling this, the task shows `👀` and is only completable via `/lgtm <id>`. Evidence is stored on the task so the human can review it hours later without scrolling back.

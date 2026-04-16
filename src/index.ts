@@ -36,7 +36,7 @@ const REMINDER_INTERVAL = 4;
 const AUTO_CLEAR_DELAY = 4;
 
 const SYSTEM_REMINDER = `<system-reminder>
-The task tools haven't been used recently. If working on tasks, use TaskCreate (requires done_criterion), TaskUpdate for status, and lgtm_ask when ready for human sign-off. Tasks can only be completed via /lgtm after calling lgtm_ask. Ignore if not applicable. Never mention this reminder to the user.
+The LGTM sign-off task tools haven't been used recently. If working on tasks, use TaskCreate (requires done_criterion), TaskUpdate for status, and lgtm_ask when ready for human sign-off. Tasks can only be completed via /lgtm after calling lgtm_ask. These are sign-off tasks: agents propose evidence, humans approve. One task per piece of evidence or decision gate. Ignore if not applicable. Never mention this reminder to the user.
 </system-reminder>`;
 
 export default function (pi: ExtensionAPI) {
@@ -148,7 +148,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "TaskCreate",
     label: "TaskCreate",
-    description: `Create a task with a clear done_criterion.
+    description: `Create an LGTM sign-off task with a clear done_criterion.
 
 ## When to Use
 
@@ -160,7 +160,7 @@ export default function (pi: ExtensionAPI) {
 - **subject**: Brief actionable title
 - **description**: Detailed description with context
 - **done_criterion**: REQUIRED. Falsifiable observation that distinguishes done from fail/null/incomplete/silent-fail. State expected AND wrong-case observations (e.g., "All 92 tests pass. If wrong: type errors in build or test failures in task-store.test.ts")
-- **activeForm** (optional): Present continuous for spinner
+- **progress_label** (optional): What the agent is currently doing, shown during in-progress tasks
 
 Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
     promptGuidelines: [
@@ -172,13 +172,13 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
       subject: Type.String({ description: "Brief task title" }),
       description: Type.String({ description: "Detailed description" }),
       done_criterion: Type.String({ description: "Falsifiable observation that distinguishes DONE from fail, null result, incomplete, or silent failure. State what you expect to see AND what you'd see if it's wrong." }),
-      activeForm: Type.Optional(Type.String({ description: "Present continuous for spinner" })),
+      progress_label: Type.Optional(Type.String({ description: "What the agent is currently doing, shown during in-progress tasks" })),
       metadata: Type.Optional(Type.Record(Type.String(), Type.Any())),
     }),
 
     execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       autoClear.resetBatchCountdown();
-      const task = store.create(params.subject, params.description, params.done_criterion, params.activeForm, params.metadata);
+      const task = store.create(params.subject, params.description, params.done_criterion, params.progress_label, params.metadata);
       widget.update();
       return Promise.resolve(textResult(`Task #${task.id} created: ${task.subject}\nDone criterion: ${task.done_criterion}`));
     },
@@ -191,7 +191,7 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
   pi.registerTool({
     name: "TaskList",
     label: "TaskList",
-    description: `List all tasks. Tasks with 👀 are pending human sign-off via /lgtm.`,
+    description: `List all LGTM sign-off tasks. Tasks with 👀 are pending human sign-off via /lgtm.`,
     parameters: Type.Object({}),
 
     execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
@@ -208,7 +208,6 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
       const lines = sorted.map(task => {
         let line = `#${task.id} [${task.status}] ${task.subject}`;
         if (task.pending_approval && task.status !== "completed") line += " 👀";
-        if (task.owner) line += ` (${task.owner})`;
         if (task.blockedBy.length > 0) {
           const openBlockers = task.blockedBy.filter(bid => {
             const blocker = store.get(bid);
@@ -230,7 +229,7 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
   pi.registerTool({
     name: "TaskGet",
     label: "TaskGet",
-    description: `Get full task details including done_criterion and approval state.`,
+    description: `Get full LGTM sign-off task details including done_criterion and approval state.`,
     parameters: Type.Object({
       taskId: Type.String({ description: "Task ID to retrieve" }),
     }),
@@ -245,7 +244,6 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
         `Status: ${task.status}${task.pending_approval && task.status !== "completed" ? " 👀 (pending sign-off)" : ""}`,
         `Done criterion: ${task.done_criterion}`,
       ];
-      if (task.owner) lines.push(`Owner: ${task.owner}`);
       lines.push(`Description: ${desc}`);
       if (task.blockedBy.length > 0) {
         const openBlockers = task.blockedBy.filter(bid => {
@@ -269,7 +267,7 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
   pi.registerTool({
     name: "TaskUpdate",
     label: "TaskUpdate",
-    description: `Update task fields or status.
+    description: `Update LGTM sign-off task fields or status.
 
 Status: pending -> in_progress -> (call lgtm_ask) -> /lgtm -> completed
 
@@ -283,14 +281,13 @@ Cannot set status=completed here. Use lgtm_ask then /lgtm <id>.`,
         ],
         description: "New status. Cannot set completed — use /lgtm after lgtm_ask.",
       })),
-      subject: Type.Optional(Type.String()),
-      description: Type.Optional(Type.String()),
-      done_criterion: Type.Optional(Type.String()),
-      activeForm: Type.Optional(Type.String()),
-      owner: Type.Optional(Type.String()),
+      subject: Type.Optional(Type.String({ description: "Brief task title" })),
+      description: Type.Optional(Type.String({ description: "Detailed description" })),
+      done_criterion: Type.Optional(Type.String({ description: "Falsifiable observation distinguishing done from fail" })),
+      progress_label: Type.Optional(Type.String({ description: "What the agent is currently doing" })),
       metadata: Type.Optional(Type.Record(Type.String(), Type.Any())),
-      addBlocks: Type.Optional(Type.Array(Type.String())),
-      addBlockedBy: Type.Optional(Type.Array(Type.String())),
+      add_blocks: Type.Optional(Type.Array(Type.String(), { description: "Task IDs this task blocks" })),
+      add_blocked_by: Type.Optional(Type.Array(Type.String(), { description: "Task IDs that block this task" })),
     }),
 
     execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -337,19 +334,19 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
 ## Fields
 
 - **evidence**: Auditable proof — command output, table, file path, link
-- **failure_mode_1**: Most likely way this could be wrong despite evidence
-- **failure_mode_2**: Most perverse or sneaky failure -- one that looks like success superficially, corrupts silently, or only breaks under specific conditions (scale, time, edge case). E.g. feature active but wrong mechanism, works in tests but degrades in prod, correct output for wrong reason.
+- **failure_likely**: Most likely way this could be wrong despite evidence
+- **failure_sneaky**: Most perverse or sneaky failure -- one that looks like success superficially, corrupts silently, or only breaks under specific conditions (scale, time, edge case). E.g. feature active but wrong mechanism, works in tests but degrades in prod, correct output for wrong reason.
 - **falsification_test**: What you ran and what you got -- presented so both you and the human can sanity-check it. State: what you ran (command, experiment, log inspection), the actual output or result, and why that result could not occur if a failure mode were real. Must be traceable: include file paths, log snippets, counts, or commit. Human should be able to verify without re-running anything.
-- **evidence_files** (optional): File paths human should inspect -- must exist
-- **remaining_uncertainty** (optional): What's NOT tested, known limitations, deferred edge cases`,
+- **verification_hints**: Where to look and what to check. Descriptions of evidence locations, not bare file paths. E.g. "lines 45-60 in src/loss.py show the gradient check" not "src/loss.py".
+- **remaining_uncertainty**: What's NOT tested, known limitations, deferred edge cases`,
     parameters: Type.Object({
       taskId: Type.String({ description: "Task ID to submit for sign-off" }),
-      evidence: Type.String({ description: "Auditable proof with full reproducibility: exact command run and its output, commit hash, config/seeds used, output file paths. Must be re-runnable by the human. 'I wrote X' is not evidence -- 'I ran X and got Y' is. Include counts, snippets, test output." }),
-      failure_mode_1: Type.String({ description: "Most likely way this could be wrong despite evidence" }),
-      failure_mode_2: Type.String({ description: "Most perverse or sneaky failure: looks like success superficially, corrupts silently, or only breaks at scale/time/edge case. E.g. correct output for wrong reason, feature active but wrong mechanism, passes tests but degrades in prod." }),
+      evidence: Type.String({ description: "Auditable proof: exact command run + output, commit, config/seeds, file paths. Re-runnable by the human. 'I wrote X' is not evidence -- 'I ran X and got Y' is. Include counts, snippets, test output." }),
+      failure_likely: Type.String({ description: "Most likely way this could be wrong despite evidence" }),
+      failure_sneaky: Type.String({ description: "Most perverse or sneaky failure: looks like success superficially, corrupts silently, or only breaks at scale/time/edge case. E.g. correct output for wrong reason, feature active but wrong mechanism, passes tests but degrades in prod." }),
       falsification_test: Type.String({ description: "What you ran and what you got, presented so both you and the human can sanity-check it. State: what you ran (command/experiment/log check), the actual output or result, and why that result could not occur if a failure mode were real. Must be traceable: include file paths, log snippets, counts, or commit. The human should be able to verify without re-running anything." }),
-      evidence_files: Type.Optional(Type.Array(Type.String(), { description: "File paths to inspect (must exist)" })),
-      remaining_uncertainty: Type.Optional(Type.String({ description: "What's NOT tested, known limitations, edge cases deferred. Be honest about scope boundaries." })),
+      verification_hints: Type.Array(Type.String(), { description: "Where to look and what to check. Descriptions of evidence locations, not bare file paths. E.g. 'lines 45-60 in src/loss.py show the gradient check' not 'src/loss.py'." }),
+      remaining_uncertainty: Type.String({ description: "What's NOT tested, known limitations, edge cases deferred. If you can't articulate uncertainty, you haven't thought hard enough." }),
     }),
 
     execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -357,28 +354,24 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
       if (!task) return Promise.resolve(textResult(`Task #${params.taskId} not found`));
       if (task.status === "completed") return Promise.resolve(textResult(`Task #${params.taskId} already completed`));
 
-      if (params.evidence_files?.length) {
-        for (const f of params.evidence_files) {
-          if (!existsSync(f)) return Promise.resolve(textResult(`Evidence file not found: ${f}`));
-        }
-      }
+      // verification_hints are descriptions, not validated file paths
 
       store.update(params.taskId, {
         pending_approval: true,
         metadata: {
           lgtm_evidence: params.evidence,
-          lgtm_failure_mode_1: params.failure_mode_1,
-          lgtm_failure_mode_2: params.failure_mode_2,
+          lgtm_failure_likely: params.failure_likely,
+          lgtm_failure_sneaky: params.failure_sneaky,
           lgtm_falsification_test: params.falsification_test,
-          lgtm_evidence_files: params.evidence_files ?? [],
-          lgtm_remaining_uncertainty: params.remaining_uncertainty ?? "",
+          lgtm_verification_hints: params.verification_hints,
+          lgtm_remaining_uncertainty: params.remaining_uncertainty,
           lgtm_submitted_at: new Date().toISOString(),
         },
       });
       widget.update();
 
-      const filesSection = params.evidence_files?.length
-        ? `\n### Evidence files\n${params.evidence_files.map(f => `- ${f}`).join("\n")}`
+      const hintsSection = params.verification_hints?.length
+        ? `\n### Verification hints\n${params.verification_hints.map(h => `- ${h}`).join("\n")}`
         : "";
       const uncertaintySection = params.remaining_uncertainty
         ? `\n### Remaining uncertainty\n${params.remaining_uncertainty}`
@@ -388,10 +381,10 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
         `## Task #${task.id}: ${task.subject}\n` +
         `Done criterion: ${task.done_criterion}\n\n` +
         `### Evidence\n${params.evidence}\n\n` +
-        `### Failure mode 1\n${params.failure_mode_1}\n\n` +
-        `### Failure mode 2\n${params.failure_mode_2}\n\n` +
+        `### Failure (likely)\n${params.failure_likely}\n\n` +
+        `### Failure (sneaky)\n${params.failure_sneaky}\n\n` +
         `### Falsification test\n${params.falsification_test}` +
-        filesSection +
+        hintsSection +
         uncertaintySection +
         `\n\n---\n` +
         `Task #${task.id} is now pending human sign-off via \`/lgtm ${task.id}\`.\n\n` +
@@ -482,11 +475,11 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
         let evidenceNote = "";
         if (em.lgtm_evidence) {
           const parts = [`\n\nEvidence (${em.lgtm_submitted_at ?? "?"}):\n${em.lgtm_evidence}`];
-          parts.push(`FM1 (likely): ${em.lgtm_failure_mode_1}`);
-          parts.push(`FM2 (subtle/silent): ${em.lgtm_failure_mode_2}`);
+          parts.push(`Failure (likely): ${em.lgtm_failure_likely}`);
+          parts.push(`Failure (sneaky): ${em.lgtm_failure_sneaky}`);
           if (em.lgtm_falsification_test) parts.push(`Falsification test: ${em.lgtm_falsification_test}`);
           if (em.lgtm_remaining_uncertainty) parts.push(`Uncertainty: ${em.lgtm_remaining_uncertainty}`);
-          if (em.lgtm_evidence_files?.length) parts.push(`Files: ${em.lgtm_evidence_files.join(", ")}`);
+          if (em.lgtm_verification_hints?.length) parts.push(`Hints: ${em.lgtm_verification_hints.join(", ")}`);
           evidenceNote = parts.join("\n");
         }
         const title = `#${task.id} [${task.status}] ${task.subject}\nDone: ${task.done_criterion}${pendingNote}\n${task.description}${evidenceNote}`;
@@ -541,11 +534,11 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
     const evidenceParts: string[] = [];
     if (m.lgtm_evidence) {
       evidenceParts.push(`Evidence:\n${m.lgtm_evidence}`);
-      evidenceParts.push(`FM1 (likely): ${m.lgtm_failure_mode_1}`);
-      evidenceParts.push(`FM2 (subtle/silent): ${m.lgtm_failure_mode_2}`);
+      evidenceParts.push(`Failure (likely): ${m.lgtm_failure_likely}`);
+      evidenceParts.push(`Failure (sneaky): ${m.lgtm_failure_sneaky}`);
       if (m.lgtm_falsification_test) evidenceParts.push(`Falsification test: ${m.lgtm_falsification_test}`);
       if (m.lgtm_remaining_uncertainty) evidenceParts.push(`Remaining uncertainty: ${m.lgtm_remaining_uncertainty}`);
-      if (m.lgtm_evidence_files?.length) evidenceParts.push(`Files: ${m.lgtm_evidence_files.join(", ")}`);
+      if (m.lgtm_verification_hints?.length) evidenceParts.push(`Hints: ${m.lgtm_verification_hints.join(", ")}`);
       evidenceParts.push(`Submitted: ${m.lgtm_submitted_at}`);
     }
     const evidenceSummary = evidenceParts.length > 0 ? evidenceParts.join("\n\n") : "(no stored evidence)";
