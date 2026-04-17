@@ -36,6 +36,7 @@ describe("getReviewBadges", () => {
           scope: "task evidence",
           observations: ["Observed one unchecked edge case"],
           blind_spots: "Did not inspect prod traffic",
+          accepted: false,
           evidence_complete: false,
           evidence_convincing: false,
           missing_evidence: ["Prod traffic sample"],

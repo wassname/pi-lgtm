@@ -104,6 +104,7 @@ Required fields:
 | `scope` | What the reviewer inspected |
 | `observations` | Concrete observations only. No advice, verdicts, or editorial |
 | `blind_spots` | What the reviewer did not inspect or could not verify |
+| `accepted` | Overall accept/reject decision for whether the task is ready to advance |
 | `evidence_complete` | Whether the supplied evidence actually covers the done criterion |
 | `evidence_convincing` | Whether the supplied evidence would convince a skeptical reviewer |
 | `missing_evidence` | Concrete missing checks or artifacts needed before human sign-off |
@@ -127,7 +128,7 @@ PI_LGTM_ROBOT_REVIEW_CMD='acpx --approve-reads --non-interactive-permissions den
 PI_LGTM_AUTO_ROBOT_REVIEW=1
 ```
 
-This appends a new robot-review iteration. If the latest robot review sets `evidence_complete=false` or `evidence_convincing=false`, `/lgtm` is blocked until stronger evidence is submitted and reviewed again.
+This appends a new robot-review iteration. The reviewer returns an explicit `accepted` boolean as well as detailed observations, blind spots, and missing evidence. If the latest robot review rejects the evidence, `/lgtm` is blocked until stronger evidence is submitted and reviewed again.
 
 ## Commands
 

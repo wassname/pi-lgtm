@@ -8,6 +8,7 @@ export interface RobotReviewRecord {
   scope: string;
   observations: string[];
   blind_spots: string;
+  accepted: boolean;
   evidence_complete: boolean;
   evidence_convincing: boolean;
   missing_evidence: string[];
@@ -33,6 +34,10 @@ function normalizeReview(value: unknown, index: number): RobotReviewRecord | und
     scope,
     observations,
     blind_spots: typeof review.blind_spots === "string" ? review.blind_spots : "not recorded",
+    accepted: typeof review.accepted === "boolean"
+      ? review.accepted
+      : (typeof review.evidence_complete === "boolean" ? review.evidence_complete : true)
+        && (typeof review.evidence_convincing === "boolean" ? review.evidence_convincing : true),
     evidence_complete: typeof review.evidence_complete === "boolean" ? review.evidence_complete : true,
     evidence_convincing: typeof review.evidence_convincing === "boolean" ? review.evidence_convincing : true,
     missing_evidence: toStringArray(review.missing_evidence),
@@ -51,6 +56,10 @@ function getLegacyRobotReview(task: Task): RobotReviewRecord | undefined {
     scope: typeof task.metadata?.robot_review_scope === "string" ? task.metadata.robot_review_scope : "unknown",
     observations,
     blind_spots: typeof task.metadata?.robot_review_blind_spots === "string" ? task.metadata.robot_review_blind_spots : "not recorded",
+    accepted: typeof task.metadata?.robot_review_accepted === "boolean"
+      ? task.metadata.robot_review_accepted
+      : (typeof task.metadata?.robot_review_evidence_complete === "boolean" ? task.metadata.robot_review_evidence_complete : true)
+        && (typeof task.metadata?.robot_review_evidence_convincing === "boolean" ? task.metadata.robot_review_evidence_convincing : true),
     evidence_complete: typeof task.metadata?.robot_review_evidence_complete === "boolean" ? task.metadata.robot_review_evidence_complete : true,
     evidence_convincing: typeof task.metadata?.robot_review_evidence_convincing === "boolean" ? task.metadata.robot_review_evidence_convincing : true,
     missing_evidence: toStringArray(task.metadata?.robot_review_missing_evidence),
@@ -81,6 +90,7 @@ export function getLatestRobotReview(task: Task): RobotReviewRecord | undefined 
 export function appendRobotReviewMetadata(task: Task, review: Omit<RobotReviewRecord, "iteration">): Record<string, unknown> {
   const robot_reviews = [...getRobotReviews(task), { ...review, iteration: 0 }].map((entry, index) => ({
     ...entry,
+    accepted: entry.accepted,
     iteration: index + 1,
   }));
   const latest = robot_reviews[robot_reviews.length - 1];
@@ -90,6 +100,7 @@ export function appendRobotReviewMetadata(task: Task, review: Omit<RobotReviewRe
     robot_review_scope: latest.scope,
     robot_review_observations: latest.observations,
     robot_review_blind_spots: latest.blind_spots,
+    robot_review_accepted: latest.accepted,
     robot_review_evidence_complete: latest.evidence_complete,
     robot_review_evidence_convincing: latest.evidence_convincing,
     robot_review_missing_evidence: latest.missing_evidence,
@@ -103,5 +114,5 @@ export function appendRobotReviewMetadata(task: Task, review: Omit<RobotReviewRe
 
 export function latestRobotReviewPasses(task: Task): boolean {
   const latest = getLatestRobotReview(task);
-  return latest ? latest.evidence_complete && latest.evidence_convincing : false;
+  return latest ? latest.accepted : false;
 }

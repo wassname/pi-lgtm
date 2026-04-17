@@ -22,6 +22,7 @@ import { AutoClearManager } from "./auto-clear.js";
 import { getReviewBadges, REVIEW_BADGES } from "./review-badges.js";
 import {
   appendRobotReviewMetadata,
+  getLatestRobotReview,
   getRobotReviews,
   latestRobotReviewPasses,
   type RobotReviewRecord,
@@ -80,6 +81,7 @@ function formatRobotReview(review: RobotReviewRecord): string {
     `Robot review #${review.iteration} (${review.submitted_at})`,
     `Reviewer: ${review.reviewer}${review.mode === "auto" ? " [auto]" : ""}`,
     `Scope: ${review.scope}`,
+    `Accepted: ${review.accepted ? "yes" : "no"}`,
     `Evidence complete: ${review.evidence_complete ? "yes" : "no"}`,
     `Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}`,
     `Observations:\n- ${review.observations.join("\n- ")}`,
@@ -101,7 +103,7 @@ function buildRobotReviewPrompt(task: any): string {
     "Set evidence_convincing=false if the evidence exists but would not convince a skeptical reviewer.",
     "Return exactly one JSON object between the markers ROBOT_REVIEW_JSON_START and ROBOT_REVIEW_JSON_END.",
     "JSON schema:",
-    '{"reviewer":"string","scope":"string","observations":["string"],"blind_spots":"string","evidence_complete":true,"evidence_convincing":true,"missing_evidence":["string"]}',
+    '{"reviewer":"string","scope":"string","observations":["string"],"blind_spots":"string","accepted":true,"evidence_complete":true,"evidence_convincing":true,"missing_evidence":["string"]}',
     "",
     `Task #${task.id}: ${task.subject}`,
     `Done criterion: ${task.done_criterion}`,
@@ -117,7 +119,7 @@ function buildRobotReviewPrompt(task: any): string {
     priorSection,
     "Output format:",
     "ROBOT_REVIEW_JSON_START",
-    '{"reviewer":"...","scope":"...","observations":["..."],"blind_spots":"...","evidence_complete":true,"evidence_convincing":true,"missing_evidence":["..."]}',
+    '{"reviewer":"...","scope":"...","observations":["..."],"blind_spots":"...","accepted":true,"evidence_complete":true,"evidence_convincing":true,"missing_evidence":["..."]}',
     "ROBOT_REVIEW_JSON_END",
   ].join("\n");
 }
@@ -147,6 +149,9 @@ async function runAutomaticRobotReview(
       scope: typeof parsed.scope === "string" ? parsed.scope : "task evidence package",
       observations,
       blind_spots: typeof parsed.blind_spots === "string" ? parsed.blind_spots : "not stated",
+      accepted: typeof parsed.accepted === "boolean"
+        ? parsed.accepted
+        : parsed.evidence_complete === true && parsed.evidence_convincing === true,
       evidence_complete: parsed.evidence_complete === true,
       evidence_convincing: parsed.evidence_convincing === true,
       missing_evidence,
@@ -247,6 +252,27 @@ export default function (pi: ExtensionAPI) {
     widget.setUICtx(ctx.ui as UICtx);
     upgradeStoreIfNeeded(ctx);
     showPersistedTasks();
+  });
+
+  pi.on("before_agent_start", async (event) => {
+    const followups = store.list().flatMap(task => {
+      const latest = getLatestRobotReview(task);
+      return latest && !latest.accepted ? [{ task, latest }] : [];
+    });
+    if (followups.length === 0) return undefined;
+
+    const reminder = followups.map(({ task, latest }) => {
+      const missing = latest.missing_evidence.length > 0
+        ? ` Missing evidence: ${latest.missing_evidence.join("; ")}.`
+        : "";
+      return `- Task #${task.id} ${task.subject}: latest robot review rejected the evidence.${missing} Strengthen the evidence, call lgtm_ask again, then rerun robot_review_run before asking for human sign-off.`;
+    }).join("\n");
+
+    return {
+      systemPrompt:
+        event.systemPrompt +
+        `\n\n<system-reminder>\nLatest robot review follow-up required:\n${reminder}\nDo not ask for human sign-off until the latest robot review accepts the evidence.\n</system-reminder>\n`,
+    };
   });
 
   pi.on("session_switch" as any, async (event: any, ctx: ExtensionContext) => {
@@ -578,6 +604,7 @@ This does not complete the task. Human /lgtm remains the only completion path.`,
       blind_spots: Type.String({ description: "What the reviewer did not inspect or could not verify" }),
       evidence_complete: Type.Boolean({ description: "Whether the supplied evidence covers the claimed done criterion." }),
       evidence_convincing: Type.Boolean({ description: "Whether the supplied evidence would convince a skeptical reviewer." }),
+      accepted: Type.Optional(Type.Boolean({ description: "Overall review decision. Defaults to evidence_complete && evidence_convincing." })),
       missing_evidence: Type.Optional(Type.Array(Type.String(), { description: "Concrete missing checks, artifacts, or observations needed before human sign-off." })),
     }),
 
@@ -594,6 +621,7 @@ This does not complete the task. Human /lgtm remains the only completion path.`,
             scope: params.scope,
             observations: params.observations,
             blind_spots: params.blind_spots,
+            accepted: params.accepted ?? (params.evidence_complete && params.evidence_convincing),
             evidence_complete: params.evidence_complete,
             evidence_convincing: params.evidence_convincing,
             missing_evidence: params.missing_evidence ?? [],
@@ -609,6 +637,7 @@ This does not complete the task. Human /lgtm remains the only completion path.`,
         `Iteration: ${getRobotReviews(store.get(params.taskId)!).length}\n` +
         `Reviewer: ${params.reviewer}\n` +
         `Scope: ${params.scope}\n\n` +
+        `Accepted: ${(params.accepted ?? (params.evidence_complete && params.evidence_convincing)) ? "yes" : "no"}\n` +
         `Evidence complete: ${params.evidence_complete ? "yes" : "no"}\n` +
         `Evidence convincing: ${params.evidence_convincing ? "yes" : "no"}\n\n` +
         `### Observations\n${params.observations.map(o => `- ${o}`).join("\n")}\n\n` +
@@ -651,6 +680,7 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
         `## Automatic robot review for task #${task.id}: ${task.subject}\n` +
         `Reviewer command: ${command}\n` +
         `Iteration: ${getRobotReviews(store.get(params.taskId)!).length}\n` +
+        `Accepted: ${review.accepted ? "yes" : "no"}\n` +
         `Evidence complete: ${review.evidence_complete ? "yes" : "no"}\n` +
         `Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}\n\n` +
         `### Observations\n${review.observations.map(o => `- ${o}`).join("\n")}\n\n` +
