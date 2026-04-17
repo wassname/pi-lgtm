@@ -38,15 +38,105 @@ function textResult(msg: string) {
 const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "lgtm_ask", "robot_review_ask", "robot_review_run"]);
 const REMINDER_INTERVAL = 4;
 const AUTO_CLEAR_DELAY = 4;
+export const DEFAULT_ROBOT_REVIEW_TIMEOUT_MS = 120_000;
 
 type CommandResult = { stdout: string; stderr: string; exitCode: number | null };
 
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-  const currentScript = process.argv[1];
-  if (currentScript) {
-    return { command: process.execPath, args: [currentScript, ...args] };
+export function getPiInvocation(
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): { command: string; args: string[] } {
+  const configured = env.PI_LGTM_PI_BIN?.trim();
+  return { command: configured || "pi", args };
+}
+
+export function getRobotReviewTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number.parseInt(env.PI_LGTM_ROBOT_REVIEW_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_ROBOT_REVIEW_TIMEOUT_MS;
+}
+
+function getAssistantTextFromPiEvent(event: any): string | undefined {
+  if (event?.type !== "message_end" || event.message?.role !== "assistant" || !Array.isArray(event.message.content)) {
+    return undefined;
   }
-  return { command: "pi", args };
+  const text = event.message.content.find((part: any) => part?.type === "text")?.text;
+  return typeof text === "string" ? text : undefined;
+}
+
+export function extractFinalAssistantTextFromPiJsonl(output: string): string {
+  let buffer = "";
+  let finalAssistantText = "";
+  const lines = output.split("\n");
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    buffer = line;
+    try {
+      const text = getAssistantTextFromPiEvent(JSON.parse(line));
+      if (text) finalAssistantText = text;
+      buffer = "";
+    } catch {
+      // ignore malformed line noise from the child process
+    }
+  }
+  if (buffer.trim()) {
+    try {
+      const text = getAssistantTextFromPiEvent(JSON.parse(buffer));
+      if (text) finalAssistantText = text;
+    } catch {
+      // ignore malformed trailing line
+    }
+  }
+  return finalAssistantText;
+}
+
+export async function runRobotReviewCommand(
+  invocation: { command: string; args: string[] },
+  signal?: AbortSignal,
+  timeoutMs = getRobotReviewTimeoutMs(),
+): Promise<CommandResult> {
+  return new Promise<CommandResult>((resolve, reject) => {
+    const child = spawn(invocation.command, invocation.args, { shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let settled = false;
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
+
+    const killTimer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(() => reject(new Error(`Robot reviewer timed out after ${timeoutMs}ms.`)));
+    }, timeoutMs);
+
+    child.stdout.on("data", (data) => stdoutChunks.push(data));
+    child.stderr.on("data", (data) => stderrChunks.push(data));
+    child.on("error", (err) => {
+      clearTimeout(killTimer);
+      finish(() => reject(err));
+    });
+    const onAbort = () => {
+      clearTimeout(killTimer);
+      child.kill("SIGTERM");
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    child.on("close", (exitCode) => {
+      clearTimeout(killTimer);
+      signal?.removeEventListener("abort", onAbort);
+      if (signal?.aborted) {
+        finish(() => reject(new Error("aborted")));
+        return;
+      }
+      const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
+      finish(() => resolve({
+        stdout: extractFinalAssistantTextFromPiJsonl(stdout) || stdout,
+        stderr: Buffer.concat(stderrChunks).toString("utf-8"),
+        exitCode,
+      }));
+    });
+  });
 }
 
 function extractRobotReviewJson(output: string): Record<string, unknown> {
@@ -113,63 +203,9 @@ async function runAutomaticRobotReview(
   if (reviewerModel) args.push("--model", reviewerModel);
   args.push(prompt);
   const invocation = getPiInvocation(args);
-  const commandLabel = `${invocation.command} ${args.slice(0, reviewerModel ? 6 : 4).join(" ")}`;
-  const result = await new Promise<CommandResult>((resolve, reject) => {
-    const child = spawn(invocation.command, invocation.args, { shell: false, stdio: ["ignore", "pipe", "pipe"] });
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let buffer = "";
-    let finalAssistantText = "";
-    child.stdout.on("data", (data) => {
-      stdoutChunks.push(data);
-      buffer += data.toString("utf-8");
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line) as any;
-          if (event.type === "message_end" && event.message?.role === "assistant") {
-            const text = Array.isArray(event.message.content)
-              ? event.message.content.find((part: any) => part.type === "text")?.text
-              : undefined;
-            if (typeof text === "string") finalAssistantText = text;
-          }
-        } catch {
-          // ignore malformed line noise
-        }
-      }
-    });
-    child.stderr.on("data", (data) => stderrChunks.push(data));
-    child.on("error", reject);
-    const onAbort = () => child.kill();
-    signal?.addEventListener("abort", onAbort, { once: true });
-    child.on("close", (exitCode) => {
-      signal?.removeEventListener("abort", onAbort);
-      if (signal?.aborted) {
-        reject(new Error("aborted"));
-        return;
-      }
-      if (buffer.trim()) {
-        try {
-          const event = JSON.parse(buffer) as any;
-          if (event.type === "message_end" && event.message?.role === "assistant") {
-            const text = Array.isArray(event.message.content)
-              ? event.message.content.find((part: any) => part.type === "text")?.text
-              : undefined;
-            if (typeof text === "string") finalAssistantText = text;
-          }
-        } catch {
-          // ignore malformed trailing line
-        }
-      }
-      resolve({
-        stdout: finalAssistantText || Buffer.concat(stdoutChunks).toString("utf-8"),
-        stderr: Buffer.concat(stderrChunks).toString("utf-8"),
-        exitCode,
-      });
-    });
-  });
+  const timeoutMs = getRobotReviewTimeoutMs();
+  const commandLabel = `${invocation.command} ${invocation.args.slice(0, reviewerModel ? 6 : 4).join(" ")}`;
+  const result = await runRobotReviewCommand(invocation, signal, timeoutMs);
   if (result.exitCode !== 0) {
     throw new Error(`Robot reviewer failed (${result.exitCode ?? "?"}): ${(result.stderr || result.stdout).trim()}`);
   }
