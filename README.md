@@ -6,7 +6,7 @@ A [pi](https://pi.dev) extension that adds structured human sign-off to task tra
 
 The core idea: agents cannot mark tasks complete themselves. They must call `lgtm_ask` with auditable evidence and explicit failure-mode analysis, then a human signs off via `/lgtm <id>`.
 
-Tasks can also carry a separate fresh-perspective robot review from a subagent or other model family. That review is observational only and never completes the task.
+Tasks can also carry a separate fresh-perspective robot review from a subagent or other model family. Robot reviews can iterate: if the latest review says the evidence is incomplete or unconvincing, human sign-off is held back until the agent strengthens the evidence and reruns review.
 
 ## Install
 
@@ -46,7 +46,7 @@ Stripped: `TaskExecute`, `TaskOutput`, `TaskStop`, `process-tracker.ts`, subagen
 Badges:
 
 - `🛠` tool evidence attached via `lgtm_ask`
-- `🤖` robot review attached via `robot_review_ask`
+- `🤖` one or more robot review iterations attached
 - `👀` pending human sign-off via `/lgtm`
 
 ## Tools
@@ -89,6 +89,8 @@ After calling this, the task shows `👀` and is only completable via `/lgtm <id
 
 The tool result includes a non-blocking self-check prompt asking whether the evidence directly addresses the `done_criterion` and whether a skeptical reviewer would find it convincing.
 
+`lgtm_ask` also accepts `run_robot_review` (optional). If true, or if `PI_LGTM_AUTO_ROBOT_REVIEW=1`, the extension runs the configured robot reviewer immediately after storing evidence. A failing robot review clears `pending_approval` until the evidence is strengthened.
+
 ### `robot_review_ask`
 
 Attach a fresh-perspective robot review to a task.
@@ -102,8 +104,30 @@ Required fields:
 | `scope` | What the reviewer inspected |
 | `observations` | Concrete observations only. No advice, verdicts, or editorial |
 | `blind_spots` | What the reviewer did not inspect or could not verify |
+| `evidence_complete` | Whether the supplied evidence actually covers the done criterion |
+| `evidence_convincing` | Whether the supplied evidence would convince a skeptical reviewer |
+| `missing_evidence` | Concrete missing checks or artifacts needed before human sign-off |
 
-Use this from a separate subagent or other model when possible. The review is additive: it shows up as `🤖`, is visible in task detail and `/lgtm`, and does not complete the task.
+Use this from a separate subagent or other model when possible. Reviews append as iterations; the latest one is what gates human sign-off.
+
+### `robot_review_run`
+
+Run the configured automatic robot reviewer against the current task evidence.
+
+Default reviewer command:
+
+```bash
+acpx --approve-reads --non-interactive-permissions deny opencode exec
+```
+
+Override with:
+
+```bash
+PI_LGTM_ROBOT_REVIEW_CMD='acpx --approve-reads --non-interactive-permissions deny codex exec'
+PI_LGTM_AUTO_ROBOT_REVIEW=1
+```
+
+This appends a new robot-review iteration. If the latest robot review sets `evidence_complete=false` or `evidence_convincing=false`, `/lgtm` is blocked until stronger evidence is submitted and reviewed again.
 
 ## Commands
 
@@ -118,7 +142,11 @@ Interactive menu: view tasks, create task, clear completed/all.
 ## Task lifecycle
 
 ```
-pending -> in_progress -> (lgtm_ask) -> pending_approval 👀 -> (/lgtm) -> completed
+pending -> in_progress -> (lgtm_ask)
+                       -> robot review iteration(s) 🤖
+                       -> pending_approval 👀   if latest robot review passes or no robot review is required
+                       -> strengthen evidence + rerun review   if latest robot review fails
+                       -> (/lgtm) -> completed
                        -> deleted
 ```
 
@@ -145,8 +173,9 @@ PI_TASKS_DEBUG=1      # trace to stderr
 
 ```
 src/
-├── index.ts        # 6 tools + /tasks + /lgtm commands + widget + event handlers
+├── index.ts        # 7 tools + /tasks + /lgtm commands + widget + event handlers
 ├── review-badges.ts # Review badge helpers for tool/robot/human lanes
+├── robot-review.ts # Robot review iteration storage + compatibility helpers
 ├── types.ts        # Task, TaskStatus types
 ├── task-store.ts   # File-backed store with CRUD, locking, complete() method
 ├── auto-clear.ts   # Turn-based auto-clearing of completed tasks

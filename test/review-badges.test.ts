@@ -30,7 +30,18 @@ describe("getReviewBadges", () => {
       pending_approval: true,
       metadata: {
         lgtm_evidence: "npm test",
-        robot_review_observations: ["Observed one unchecked edge case"],
+        robot_reviews: [{
+          iteration: 1,
+          reviewer: "opencode",
+          scope: "task evidence",
+          observations: ["Observed one unchecked edge case"],
+          blind_spots: "Did not inspect prod traffic",
+          evidence_complete: false,
+          evidence_convincing: false,
+          missing_evidence: ["Prod traffic sample"],
+          submitted_at: "2026-04-17T00:00:00.000Z",
+          mode: "manual",
+        }],
       },
     });
 
