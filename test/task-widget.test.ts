@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { REVIEW_BADGES } from "../src/review-badges.js";
 import { TaskStore } from "../src/task-store.js";
 import { TaskWidget, type Theme, type UICtx } from "../src/ui/task-widget.js";
 
@@ -98,6 +99,19 @@ describe("TaskWidget", () => {
     const lines = renderWidget(ui.state);
     expect(lines[1]).toContain("✔");
     expect(lines[1]).toContain("~~#1 Done task~~");
+  });
+
+  it("renders robot review badges on completed tasks", () => {
+    store.create("Done task", "Desc", "done");
+    store.update("1", {
+      metadata: { robot_review_observations: ["Observed output drift on seed 2"] },
+      pending_approval: true,
+    });
+    store.complete("1");
+    widget.update();
+
+    const lines = renderWidget(ui.state);
+    expect(lines[1]).toContain(REVIEW_BADGES.robot);
   });
 
   it("renders active tasks with spinner icon", () => {

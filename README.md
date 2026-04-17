@@ -6,6 +6,8 @@ A [pi](https://pi.dev) extension that adds structured human sign-off to task tra
 
 The core idea: agents cannot mark tasks complete themselves. They must call `lgtm_ask` with auditable evidence and explicit failure-mode analysis, then a human signs off via `/lgtm <id>`.
 
+Tasks can also carry a separate fresh-perspective robot review from a subagent or other model family. That review is observational only and never completes the task.
+
 ## Install
 
 ```bash
@@ -19,6 +21,7 @@ pi -e ./src/index.ts
 ```
 
 ![example](media/screenshot.png)
+![alt text](img/README-1776381151332-image.png)
 
 ## What is different from pi-tasks
 
@@ -37,10 +40,14 @@ Stripped: `TaskExecute`, `TaskOutput`, `TaskStop`, `process-tracker.ts`, subagen
 ● 3 tasks (1 done, 1 in progress, 1 open)
   ✔ #1 Design schema
   ✳ #2 Implementing cache layer… (2m 49s · ↑ 4.1k ↓ 1.2k)
-  ◻ #3 Load test 👀
+  ◻ #3 Load test 🛠 🤖 👀
 ```
 
-`👀` means the agent called `lgtm_ask` and the task is waiting for human sign-off.
+Badges:
+
+- `🛠` tool evidence attached via `lgtm_ask`
+- `🤖` robot review attached via `robot_review_ask`
+- `👀` pending human sign-off via `/lgtm`
 
 ## Tools
 
@@ -82,6 +89,22 @@ After calling this, the task shows `👀` and is only completable via `/lgtm <id
 
 The tool result includes a non-blocking self-check prompt asking whether the evidence directly addresses the `done_criterion` and whether a skeptical reviewer would find it convincing.
 
+### `robot_review_ask`
+
+Attach a fresh-perspective robot review to a task.
+
+Required fields:
+
+| Field | Description |
+|---|---|
+| `taskId` | Task to annotate |
+| `reviewer` | Model/provider/family/class used for the review |
+| `scope` | What the reviewer inspected |
+| `observations` | Concrete observations only. No advice, verdicts, or editorial |
+| `blind_spots` | What the reviewer did not inspect or could not verify |
+
+Use this from a separate subagent or other model when possible. The review is additive: it shows up as `🤖`, is visible in task detail and `/lgtm`, and does not complete the task.
+
 ## Commands
 
 ### `/lgtm <id>`
@@ -122,7 +145,8 @@ PI_TASKS_DEBUG=1      # trace to stderr
 
 ```
 src/
-├── index.ts        # 5 tools + /tasks + /lgtm commands + widget + event handlers
+├── index.ts        # 6 tools + /tasks + /lgtm commands + widget + event handlers
+├── review-badges.ts # Review badge helpers for tool/robot/human lanes
 ├── types.ts        # Task, TaskStatus types
 ├── task-store.ts   # File-backed store with CRUD, locking, complete() method
 ├── auto-clear.ts   # Turn-based auto-clearing of completed tasks

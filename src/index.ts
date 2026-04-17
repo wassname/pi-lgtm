@@ -6,32 +6,28 @@
  *   TaskList     — List all tasks with status
  *   TaskGet      — Get full task details
  *   TaskUpdate   — Update task fields (completion requires /lgtm)
- *   lgtm_ask     — Present evidence + failure modes for sign-off
+ *   lgtm_ask     — Present evidence + failure modes for human sign-off
+ *   robot_review_ask — Attach observational review from a fresh-perspective agent
  *
  * Commands:
  *   /tasks       — Interactive task management menu
  *   /lgtm <id>   — Human signs off on a task (only way to complete)
  */
 
-import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { AutoClearManager } from "./auto-clear.js";
+import { getReviewBadges, REVIEW_BADGES } from "./review-badges.js";
 import { TaskStore } from "./task-store.js";
 import { loadTasksConfig } from "./tasks-config.js";
 import { TaskWidget, type UICtx } from "./ui/task-widget.js";
-
-const DEBUG = !!process.env.PI_TASKS_DEBUG;
-function debug(...args: unknown[]) {
-  if (DEBUG) console.error("[pi-lgtm]", ...args);
-}
 
 function textResult(msg: string) {
   return { content: [{ type: "text" as const, text: msg }], details: undefined as any };
 }
 
-const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "lgtm_ask"]);
+const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "lgtm_ask", "robot_review_ask"]);
 const REMINDER_INTERVAL = 4;
 const AUTO_CLEAR_DELAY = 4;
 
@@ -191,7 +187,7 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
   pi.registerTool({
     name: "TaskList",
     label: "TaskList",
-    description: `List all LGTM sign-off tasks. Tasks with 👀 are pending human sign-off via /lgtm.`,
+    description: `List all LGTM sign-off tasks. Review badges: ${REVIEW_BADGES.tool}=tool evidence, ${REVIEW_BADGES.robot}=robot review, ${REVIEW_BADGES.human}=pending human sign-off via /lgtm.`,
     parameters: Type.Object({}),
 
     execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
@@ -207,7 +203,8 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
 
       const lines = sorted.map(task => {
         let line = `#${task.id} [${task.status}] ${task.subject}`;
-        if (task.pending_approval && task.status !== "completed") line += " 👀";
+        const reviewBadges = getReviewBadges(task);
+        if (reviewBadges.length > 0) line += ` ${reviewBadges.join(" ")}`;
         if (task.blockedBy.length > 0) {
           const openBlockers = task.blockedBy.filter(bid => {
             const blocker = store.get(bid);
@@ -239,9 +236,10 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
       if (!task) return Promise.resolve(textResult("Task not found"));
 
       const desc = task.description.replace(/\\n/g, "\n");
+      const reviewBadges = getReviewBadges(task);
       const lines: string[] = [
         `Task #${task.id}: ${task.subject}`,
-        `Status: ${task.status}${task.pending_approval && task.status !== "completed" ? " 👀 (pending sign-off)" : ""}`,
+        `Status: ${task.status}${reviewBadges.length ? ` ${reviewBadges.join(" ")}` : ""}${task.pending_approval && task.status !== "completed" ? " (pending human sign-off)" : ""}`,
         `Done criterion: ${task.done_criterion}`,
       ];
       lines.push(`Description: ${desc}`);
@@ -397,6 +395,54 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
     },
   });
 
+  pi.registerTool({
+    name: "robot_review_ask",
+    label: "robot_review_ask",
+    description: `Attach fresh-perspective robot review observations to a task.
+
+Use this from a separate subagent or model when possible, ideally from a different model family/class than the implementation agent.
+Observations only: report what you saw, not advice, verdicts, prioritization, or editorial.
+
+This does not complete the task. Human /lgtm remains the only completion path.`,
+    parameters: Type.Object({
+      taskId: Type.String({ description: "Task ID to attach robot review to" }),
+      reviewer: Type.String({ description: "Reviewer identity, model family, or class" }),
+      scope: Type.String({ description: "What the reviewer examined" }),
+      observations: Type.Array(Type.String(), {
+        minItems: 1,
+        description: "Observations only. Concrete things noticed in the artifacts. No recommendations, interpretation, or editorial.",
+      }),
+      blind_spots: Type.String({ description: "What the reviewer did not inspect or could not verify" }),
+    }),
+
+    execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const task = store.get(params.taskId);
+      if (!task) return Promise.resolve(textResult(`Task #${params.taskId} not found`));
+      if (task.status === "completed") return Promise.resolve(textResult(`Task #${params.taskId} already completed`));
+
+      store.update(params.taskId, {
+        metadata: {
+          robot_review_reviewer: params.reviewer,
+          robot_review_scope: params.scope,
+          robot_review_observations: params.observations,
+          robot_review_blind_spots: params.blind_spots,
+          robot_review_submitted_at: new Date().toISOString(),
+        },
+      });
+      widget.update();
+
+      const result =
+        `## Robot review attached to task #${task.id}: ${task.subject}\n` +
+        `Reviewer: ${params.reviewer}\n` +
+        `Scope: ${params.scope}\n\n` +
+        `### Observations\n${params.observations.map(o => `- ${o}`).join("\n")}\n\n` +
+        `### Blind spots\n${params.blind_spots}\n\n` +
+        `${REVIEW_BADGES.robot} Robot review stored. Human sign-off still requires \`/lgtm ${task.id}\`.`;
+
+      return Promise.resolve(textResult(result));
+    },
+  });
+
   // ──────────────────────────────────────────────────
   // /tasks command
   // ──────────────────────────────────────────────────
@@ -442,12 +488,14 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
 
         const statusIcon = (t: (typeof tasks)[0]) => {
           if (t.status === "completed") return "✔";
-          if (t.pending_approval) return "👀";
           if (t.status === "in_progress") return "◼";
           return "◻";
         };
 
-        const choices = tasks.map(t => `${statusIcon(t)} #${t.id} [${t.status}] ${t.subject}`);
+        const choices = tasks.map(t => {
+          const badges = getReviewBadges(t);
+          return `${statusIcon(t)} #${t.id} [${t.status}] ${t.subject}${badges.length ? ` ${badges.join(" ")}` : ""}`;
+        });
         choices.push("← Back");
 
         const selected = await ui.select("Tasks", choices);
@@ -470,7 +518,7 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
         actions.push("✗ Delete");
         actions.push("← Back");
 
-        const pendingNote = task.pending_approval && task.status !== "completed" ? "\n👀 Pending /lgtm sign-off" : "";
+        const pendingNote = task.pending_approval && task.status !== "completed" ? `\n${REVIEW_BADGES.human} Pending /lgtm sign-off` : "";
         const em = task.metadata;
         let evidenceNote = "";
         if (em.lgtm_evidence) {
@@ -482,7 +530,16 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
           if (em.lgtm_verification_hints?.length) parts.push(`Hints: ${em.lgtm_verification_hints.join(", ")}`);
           evidenceNote = parts.join("\n");
         }
-        const title = `#${task.id} [${task.status}] ${task.subject}\nDone: ${task.done_criterion}${pendingNote}\n${task.description}${evidenceNote}`;
+        let robotNote = "";
+        if (em.robot_review_observations?.length) {
+          const parts = [`\n\nRobot review (${em.robot_review_submitted_at ?? "?"})`];
+          if (em.robot_review_reviewer) parts.push(`Reviewer: ${em.robot_review_reviewer}`);
+          if (em.robot_review_scope) parts.push(`Scope: ${em.robot_review_scope}`);
+          parts.push(`Observations:\n- ${em.robot_review_observations.join("\n- ")}`);
+          if (em.robot_review_blind_spots) parts.push(`Blind spots: ${em.robot_review_blind_spots}`);
+          robotNote = parts.join("\n");
+        }
+        const title = `#${task.id} [${task.status}] ${task.subject}\nDone: ${task.done_criterion}${pendingNote}\n${task.description}${evidenceNote}${robotNote}`;
         const action = await ui.select(title, actions);
 
         if (action === "▸ Start (in_progress)") {
@@ -540,6 +597,16 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
       if (m.lgtm_remaining_uncertainty) evidenceParts.push(`Remaining uncertainty: ${m.lgtm_remaining_uncertainty}`);
       if (m.lgtm_verification_hints?.length) evidenceParts.push(`Hints: ${m.lgtm_verification_hints.join(", ")}`);
       evidenceParts.push(`Submitted: ${m.lgtm_submitted_at}`);
+    }
+    if (m.robot_review_observations?.length) {
+      const robotParts = [
+        `Robot review:\nReviewer: ${m.robot_review_reviewer ?? "?"}`,
+        `Scope: ${m.robot_review_scope ?? "?"}`,
+        `Observations:\n- ${m.robot_review_observations.join("\n- ")}`,
+      ];
+      if (m.robot_review_blind_spots) robotParts.push(`Blind spots: ${m.robot_review_blind_spots}`);
+      if (m.robot_review_submitted_at) robotParts.push(`Submitted: ${m.robot_review_submitted_at}`);
+      evidenceParts.push(robotParts.join("\n"));
     }
     const evidenceSummary = evidenceParts.length > 0 ? evidenceParts.join("\n\n") : "(no stored evidence)";
     const confirm = await ctx.ui.select(

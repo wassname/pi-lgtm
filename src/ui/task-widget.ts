@@ -9,6 +9,7 @@
  */
 
 import { truncateToWidth } from "@mariozechner/pi-tui";
+import { getReviewBadges } from "../review-badges.js";
 import type { TaskStore } from "../task-store.js";
 
 // ---- Types ----
@@ -141,6 +142,8 @@ export class TaskWidget {
     for (let i = 0; i < visible.length; i++) {
       const task = visible[i];
       const isActive = this.activeTaskIds.has(task.id) && task.status === "in_progress";
+      const reviewBadges = getReviewBadges(task);
+      const reviewSuffix = reviewBadges.length > 0 ? ` ${reviewBadges.join(" ")}` : "";
 
       let icon: string;
       if (isActive) {
@@ -180,15 +183,14 @@ export class TaskWidget {
             ? ` ${theme.fg("dim", `(${elapsed} · ${tokenParts.join(" ")})`)}`
             : ` ${theme.fg("dim", `(${elapsed})`)}`;
         }
-        text = `  ${icon} ${theme.fg("dim", "#" + task.id)} ${theme.fg("accent", form + agentLabel + "…")}${stats}`;
+        text = `  ${icon} ${theme.fg("dim", "#" + task.id)} ${theme.fg("accent", form + agentLabel + "…")}${reviewSuffix}${stats}`;
       } else if (task.status === "completed") {
-        text = `  ${icon} ${theme.fg("dim", theme.strikethrough("#" + task.id + " " + task.subject))}`;
+        text = `  ${icon} ${theme.fg("dim", theme.strikethrough("#" + task.id + " " + task.subject))}${reviewSuffix}`;
       } else {
         const agentSuffix = task.status === "in_progress" && task.metadata?.agentId
           ? theme.fg("dim", ` (agent ${task.metadata.agentId.slice(0, 5)})`)
           : "";
-        const approvalSuffix = (task as any).pending_approval ? " 👀" : "";
-        text = `  ${icon} ${theme.fg("dim", "#" + task.id)} ${task.subject}${agentSuffix}${approvalSuffix}`;
+        text = `  ${icon} ${theme.fg("dim", "#" + task.id)} ${task.subject}${agentSuffix}${reviewSuffix}`;
       }
 
       lines.push(truncate(text + suffix));
