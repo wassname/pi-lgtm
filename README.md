@@ -89,7 +89,7 @@ After calling this, the task shows `👀` and is only completable via `/lgtm <id
 
 The tool result includes a non-blocking self-check prompt asking whether the evidence directly addresses the `done_criterion` and whether a skeptical reviewer would find it convincing.
 
-`lgtm_ask` also accepts `run_robot_review` (optional). If true, or if `PI_LGTM_AUTO_ROBOT_REVIEW=1`, the extension runs the configured robot reviewer immediately after storing evidence. A failing robot review clears `pending_approval` until the evidence is strengthened.
+`lgtm_ask` always runs the robot-review stage immediately after storing evidence. A failing or errored robot review clears `pending_approval` until the evidence is strengthened and reviewed again.
 
 ### `robot_review_ask`
 
@@ -115,17 +115,16 @@ Use this from a separate subagent or other model when possible. Reviews append a
 
 Run the configured automatic robot reviewer against the current task evidence.
 
-Default reviewer command:
+Default reviewer stage:
 
 ```bash
-acpx --approve-reads --non-interactive-permissions deny opencode exec
+pi --mode json -p --no-session
 ```
 
 Override with:
 
 ```bash
-PI_LGTM_ROBOT_REVIEW_CMD='acpx --approve-reads --non-interactive-permissions deny codex exec'
-PI_LGTM_AUTO_ROBOT_REVIEW=1
+PI_LGTM_ROBOT_REVIEW_MODEL='openai/gpt-5'
 ```
 
 This appends a new robot-review iteration. The reviewer returns an explicit `accepted` boolean as well as detailed observations, blind spots, and missing evidence. If the latest robot review rejects the evidence, `/lgtm` is blocked until stronger evidence is submitted and reviewed again.

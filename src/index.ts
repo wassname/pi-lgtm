@@ -41,33 +41,12 @@ const AUTO_CLEAR_DELAY = 4;
 
 type CommandResult = { stdout: string; stderr: string; exitCode: number | null };
 
-function shellQuote(text: string): string {
-  return JSON.stringify(text);
-}
-
-function runShellCommand(command: string, signal?: AbortSignal): Promise<CommandResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("bash", ["-lc", command], { stdio: ["ignore", "pipe", "pipe"] });
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    child.stdout.on("data", (data) => stdoutChunks.push(data));
-    child.stderr.on("data", (data) => stderrChunks.push(data));
-    child.on("error", reject);
-    const onAbort = () => child.kill();
-    signal?.addEventListener("abort", onAbort, { once: true });
-    child.on("close", (exitCode) => {
-      signal?.removeEventListener("abort", onAbort);
-      if (signal?.aborted) {
-        reject(new Error("aborted"));
-        return;
-      }
-      resolve({
-        stdout: Buffer.concat(stdoutChunks).toString("utf-8"),
-        stderr: Buffer.concat(stderrChunks).toString("utf-8"),
-        exitCode,
-      });
-    });
-  });
+function getPiInvocation(args: string[]): { command: string; args: string[] } {
+  const currentScript = process.argv[1];
+  if (currentScript) {
+    return { command: process.execPath, args: [currentScript, ...args] };
+  }
+  return { command: "pi", args };
 }
 
 function extractRobotReviewJson(output: string): Record<string, unknown> {
@@ -128,11 +107,69 @@ async function runAutomaticRobotReview(
   task: any,
   signal?: AbortSignal,
 ): Promise<{ review: Omit<RobotReviewRecord, "iteration">; command: string }> {
-  const reviewerCommand = process.env.PI_LGTM_ROBOT_REVIEW_CMD?.trim()
-    || "acpx --approve-reads --non-interactive-permissions deny opencode exec";
   const prompt = buildRobotReviewPrompt(task);
-  const command = `${reviewerCommand} ${shellQuote(prompt)}`;
-  const result = await runShellCommand(command, signal);
+  const args = ["--mode", "json", "-p", "--no-session"];
+  const reviewerModel = process.env.PI_LGTM_ROBOT_REVIEW_MODEL?.trim();
+  if (reviewerModel) args.push("--model", reviewerModel);
+  args.push(prompt);
+  const invocation = getPiInvocation(args);
+  const commandLabel = `${invocation.command} ${args.slice(0, reviewerModel ? 6 : 4).join(" ")}`;
+  const result = await new Promise<CommandResult>((resolve, reject) => {
+    const child = spawn(invocation.command, invocation.args, { shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let buffer = "";
+    let finalAssistantText = "";
+    child.stdout.on("data", (data) => {
+      stdoutChunks.push(data);
+      buffer += data.toString("utf-8");
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line) as any;
+          if (event.type === "message_end" && event.message?.role === "assistant") {
+            const text = Array.isArray(event.message.content)
+              ? event.message.content.find((part: any) => part.type === "text")?.text
+              : undefined;
+            if (typeof text === "string") finalAssistantText = text;
+          }
+        } catch {
+          // ignore malformed line noise
+        }
+      }
+    });
+    child.stderr.on("data", (data) => stderrChunks.push(data));
+    child.on("error", reject);
+    const onAbort = () => child.kill();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    child.on("close", (exitCode) => {
+      signal?.removeEventListener("abort", onAbort);
+      if (signal?.aborted) {
+        reject(new Error("aborted"));
+        return;
+      }
+      if (buffer.trim()) {
+        try {
+          const event = JSON.parse(buffer) as any;
+          if (event.type === "message_end" && event.message?.role === "assistant") {
+            const text = Array.isArray(event.message.content)
+              ? event.message.content.find((part: any) => part.type === "text")?.text
+              : undefined;
+            if (typeof text === "string") finalAssistantText = text;
+          }
+        } catch {
+          // ignore malformed trailing line
+        }
+      }
+      resolve({
+        stdout: finalAssistantText || Buffer.concat(stdoutChunks).toString("utf-8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf-8"),
+        exitCode,
+      });
+    });
+  });
   if (result.exitCode !== 0) {
     throw new Error(`Robot reviewer failed (${result.exitCode ?? "?"}): ${(result.stderr || result.stdout).trim()}`);
   }
@@ -143,9 +180,9 @@ async function runAutomaticRobotReview(
     ? parsed.missing_evidence.filter((item): item is string => typeof item === "string")
     : [];
   return {
-    command: reviewerCommand,
+    command: commandLabel,
     review: {
-      reviewer: typeof parsed.reviewer === "string" ? parsed.reviewer : reviewerCommand,
+      reviewer: typeof parsed.reviewer === "string" ? parsed.reviewer : commandLabel,
       scope: typeof parsed.scope === "string" ? parsed.scope : "task evidence package",
       observations,
       blind_spots: typeof parsed.blind_spots === "string" ? parsed.blind_spots : "not stated",
@@ -502,7 +539,6 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
       falsification_test: Type.String({ description: "What you ran and what you got, presented so both you and the human can sanity-check it. State: what you ran (command/experiment/log check), the actual output or result, and why that result could not occur if a failure mode were real. Must be traceable: include file paths, log snippets, counts, or commit. The human should be able to verify without re-running anything." }),
       verification_hints: Type.Array(Type.String(), { description: "Where to look and what to check. Descriptions of evidence locations, not bare file paths. E.g. 'lines 45-60 in src/loss.py show the gradient check' not 'src/loss.py'." }),
       remaining_uncertainty: Type.String({ description: "What's NOT tested, known limitations, edge cases deferred. If you can't articulate uncertainty, you haven't thought hard enough." }),
-      run_robot_review: Type.Optional(Type.Boolean({ description: "If true, run the configured automatic robot reviewer immediately after storing evidence." })),
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
@@ -525,34 +561,33 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
         },
       });
       let robotReviewNote = "";
-      const shouldRunRobotReview = params.run_robot_review ?? process.env.PI_LGTM_AUTO_ROBOT_REVIEW === "1";
-      if (shouldRunRobotReview) {
-        const refreshedTask = store.get(params.taskId);
-        if (!refreshedTask) return textResult(`Task #${params.taskId} not found after evidence update`);
-        try {
-          const { review, command } = await runAutomaticRobotReview(refreshedTask, signal);
-          store.update(params.taskId, {
-            pending_approval: review.evidence_complete && review.evidence_convincing,
-            metadata: appendRobotReviewMetadata(refreshedTask, review),
-          });
-          robotReviewNote =
-            `\n\n### Automatic robot review\n` +
-            `Reviewer command: ${command}\n` +
-            `Evidence complete: ${review.evidence_complete ? "yes" : "no"}\n` +
-            `Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}\n` +
-            `${review.observations.map(o => `- ${o}`).join("\n")}`;
-          if (review.missing_evidence.length > 0) {
-            robotReviewNote += `\nMissing evidence:\n${review.missing_evidence.map(item => `- ${item}`).join("\n")}`;
-          }
-          if (!(review.evidence_complete && review.evidence_convincing)) {
-            robotReviewNote += `\nResult: human sign-off has been held back until the evidence is strengthened and reviewed again.`;
-          }
-        } catch (err: any) {
-          robotReviewNote =
-            `\n\n### Automatic robot review\n` +
-            `Reviewer failed: ${err.message}\n` +
-            `Task remains pending human sign-off; rerun with stronger evidence or call \`robot_review_run\` after fixing reviewer setup.`;
+      const refreshedTask = store.get(params.taskId);
+      if (!refreshedTask) return textResult(`Task #${params.taskId} not found after evidence update`);
+      try {
+        const { review, command } = await runAutomaticRobotReview(refreshedTask, signal);
+        store.update(params.taskId, {
+          pending_approval: review.accepted,
+          metadata: appendRobotReviewMetadata(refreshedTask, review),
+        });
+        robotReviewNote =
+          `\n\n### Automatic robot review\n` +
+          `Reviewer: ${command}\n` +
+          `Accepted: ${review.accepted ? "yes" : "no"}\n` +
+          `Evidence complete: ${review.evidence_complete ? "yes" : "no"}\n` +
+          `Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}\n` +
+          `${review.observations.map(o => `- ${o}`).join("\n")}`;
+        if (review.missing_evidence.length > 0) {
+          robotReviewNote += `\nMissing evidence:\n${review.missing_evidence.map(item => `- ${item}`).join("\n")}`;
         }
+        if (!review.accepted) {
+          robotReviewNote += `\nResult: human sign-off has been held back until the evidence is strengthened and reviewed again.`;
+        }
+      } catch (err: any) {
+        store.update(params.taskId, { pending_approval: false });
+        robotReviewNote =
+          `\n\n### Automatic robot review\n` +
+          `Reviewer failed: ${err.message}\n` +
+          `Human sign-off is blocked until the reviewer stage succeeds.`;
       }
       widget.update();
 
@@ -574,7 +609,7 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
         uncertaintySection +
         robotReviewNote +
         `\n\n---\n` +
-        `Task #${task.id} is now ${shouldRunRobotReview && !store.get(task.id)?.pending_approval ? "not yet ready for human sign-off" : `pending human sign-off via \`/lgtm ${task.id}\``}.\n\n` +
+        `Task #${task.id} is now ${store.get(task.id)?.pending_approval ? `pending human sign-off via \`/lgtm ${task.id}\`` : "not yet ready for human sign-off"}.\n\n` +
         `**Self-check (non-blocking):** Look at this as the human will see it. ` +
         `Does the evidence directly address the done_criterion "${task.done_criterion}"? ` +
         `Would a skeptical reviewer find this convincing, or would they immediately ask ` +
@@ -654,8 +689,7 @@ This does not complete the task. Human /lgtm remains the only completion path.`,
     label: "robot_review_run",
     description: `Run the configured automatic robot reviewer against the current task evidence.
 
-Uses PI_LGTM_ROBOT_REVIEW_CMD if set, otherwise defaults to:
-\`acpx --approve-reads --non-interactive-permissions deny opencode exec\`
+Runs the same Pi-native reviewer stage used automatically by \`lgtm_ask\`.
 
 This appends a new robot-review iteration. If the reviewer marks evidence incomplete or unconvincing, pending human sign-off is cleared until stronger evidence is submitted and reviewed again.`,
     parameters: Type.Object({
@@ -671,7 +705,7 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
 
       const { review, command } = await runAutomaticRobotReview(task, signal);
       store.update(params.taskId, {
-        pending_approval: review.evidence_complete && review.evidence_convincing ? task.pending_approval : false,
+        pending_approval: review.accepted ? task.pending_approval : false,
         metadata: appendRobotReviewMetadata(task, review),
       });
       widget.update();
