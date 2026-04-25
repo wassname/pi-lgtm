@@ -1,17 +1,24 @@
 /**
  * pi-lgtm — Task tracking with structured human sign-off for pi coding agent.
  *
+ * Two-tier model:
+ *   - Tasks: agent self-manages. Trivial bookkeeping completes via TaskUpdate.
+ *   - LGTMs: significant claims. lgtm_ask submits evidence, robot review gates,
+ *     human /lgtm completes.
+ *
  * Tools:
- *   TaskCreate   — Create a task with done_criterion
- *   TaskList     — List all tasks with status
- *   TaskGet      — Get full task details
- *   TaskUpdate   — Update task fields (completion requires /lgtm)
- *   lgtm_ask     — Present evidence + failure modes for human sign-off
+ *   TaskCreate       — Create a task with done_criterion
+ *   TaskList         — List tasks grouped by status
+ *   TaskGet          — Get full task details
+ *   TaskUpdate       — Update task fields/status (gated for tasks with lgtm evidence)
+ *   lgtm_ask         — Present evidence + failure modes for human sign-off
  *   robot_review_ask — Attach observational review from a fresh-perspective agent
+ *   robot_review_run — Re-run the automatic robot reviewer
  *
  * Commands:
- *   /tasks       — Interactive task management menu
- *   /lgtm <id>   — Human signs off on a task (only way to complete)
+ *   /tasks            — Interactive task management menu
+ *   /lgtm <id...>     — Human signs off on one or more tasks
+ *   /lgtm *           — Sign off all tasks awaiting human review with passing robot review
  */
 
 import { spawn } from "node:child_process";
@@ -19,7 +26,7 @@ import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { AutoClearManager } from "./auto-clear.js";
-import { getReviewBadges, REVIEW_BADGES } from "./review-badges.js";
+import { type DisplayStatus, getDisplayStatus, getReviewBadges } from "./review-badges.js";
 import {
   appendRobotReviewMetadata,
   getLatestRobotReview,
@@ -53,6 +60,29 @@ export function getPiInvocation(
 export function getRobotReviewTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   const configured = Number.parseInt(env.PI_LGTM_ROBOT_REVIEW_TIMEOUT_MS ?? "", 10);
   return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_ROBOT_REVIEW_TIMEOUT_MS;
+}
+
+/**
+ * Pick a reviewer model from a different provider than the current one.
+ * Prefers cheap/fast models suitable for review tasks.
+ * Returns undefined if no alternate provider is available (falls back to same model).
+ */
+export function pickAlternateReviewerModel(currentProviderId?: string): string | undefined {
+  // Ordered by: cheap, fast, good enough for structured review
+  const providerModels: Record<string, string> = {
+    anthropic: "anthropic/claude-haiku-4-5",
+    "github-copilot": "github-copilot/gemini-3-flash-preview",
+    openrouter: "openrouter/google/gemini-2.5-flash",
+  };
+  const providers = Object.keys(providerModels);
+  const current = currentProviderId ?? "";
+
+  // Try a different provider first
+  for (const p of providers) {
+    if (p !== current) return providerModels[p];
+  }
+  // All same? Just return the first non-current
+  return providers.length > 0 ? providerModels[providers[0]] : undefined;
 }
 
 function getAssistantTextFromPiEvent(event: any): string | undefined {
@@ -150,11 +180,19 @@ function formatRobotReview(review: RobotReviewRecord): string {
     `Robot review #${review.iteration} (${review.submitted_at})`,
     `Reviewer: ${review.reviewer}${review.mode === "auto" ? " [auto]" : ""}`,
     `Scope: ${review.scope}`,
-    `Accepted: ${review.accepted ? "yes" : "no"}`,
-    `Evidence complete: ${review.evidence_complete ? "yes" : "no"}`,
-    `Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}`,
-    `Observations:\n- ${review.observations.join("\n- ")}`,
   ];
+  if (review.rubric) {
+    const rubricLines = Object.entries(review.rubric).map(([key, val]) =>
+      `  ${val.pass ? "PASS" : "FAIL"} ${key}: ${val.reason}`
+    );
+    parts.push(`Rubric:\n${rubricLines.join("\n")}`);
+  }
+  parts.push(
+    `**Accepted: ${review.accepted ? "yes" : "no"}**`,
+    `**Evidence complete: ${review.evidence_complete ? "yes" : "no"}**`,
+    `**Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}**`,
+    `Observations:\n- ${review.observations.join("\n- ")}`,
+  );
   if (review.missing_evidence.length > 0) parts.push(`Missing evidence:\n- ${review.missing_evidence.join("\n- ")}`);
   if (review.blind_spots) parts.push(`Blind spots: ${review.blind_spots}`);
   return parts.join("\n");
@@ -166,13 +204,31 @@ function buildRobotReviewPrompt(task: any): string {
     ? `\nPrevious robot reviews:\n${priorReviews.map(formatRobotReview).join("\n\n")}\n`
     : "\nPrevious robot reviews:\n(none)\n";
   return [
-    "Review the task evidence with a fresh perspective.",
-    "Observations should stay concrete and source-grounded.",
-    "Set evidence_complete=false if the supplied evidence does not cover the claimed done criterion.",
-    "Set evidence_convincing=false if the evidence exists but would not convince a skeptical reviewer.",
+    "You are a VALIDATION reviewer, not a flaw-finder. Your job is to sanity-check that the evidence addresses the done criterion.",
+    "Your role: validate and sanity-check. Comment and suggest, but the gate is only the rubric below.",
+    "",
+    "## Critical: Evidence must be verbatim",
+    "",
+    "Evidence should contain literal output — verbatim command output, exact log lines, markdown block quotes, table rows, URLs — not summaries or interpretations. If the evidence only says 'it worked' or 'returned 5 results' without showing the actual output, flag it under verification_hints_actionable or evidence_covers_done_criterion.",
+    "A human must be able to verify the claim from the evidence alone, without re-running anything. Summaries are not evidence. Literal output is evidence.",
+    "",
+    "## Rubric (rate each item pass/fail)",
+    "",
+    "1. evidence_covers_done_criterion: Does the evidence directly address the stated done criterion? Evidence must be verbatim (literal output, not 'it worked').",
+    "2. falsification_test_runnable: Is the falsification test concrete enough that someone could run it and get a yes/no result? Must include actual output, not just 'ran X and it worked'.",
+    "3. failure_modes_addressed: Are the failure_likely and failure_sneaky plausibly the top failure modes? (Not: are there OTHER failure modes?)",
+    "4. verification_hints_actionable: Can a human follow the verification hints to check the claim without re-running experiments? Hints must reference specific content (line ranges, output snippets, URLs), not bare paths or counts.",
+    "",
+    "Set evidence_complete=true only if items 1 and 2 pass.",
+    "Set evidence_convincing=true only if items 1, 2, AND 4 pass.",
+    "Set accepted=true only if ALL rubric items pass.",
+    "",
+    "Observations: report what you see, not what might be missing. Comments and suggestions go in observations.",
+    "missing_evidence: ONLY items from the rubric that failed. Do NOT add new dimensions.",
+    "",
     "Return exactly one JSON object between the markers ROBOT_REVIEW_JSON_START and ROBOT_REVIEW_JSON_END.",
-    "JSON schema:",
-    '{"reviewer":"string","scope":"string","observations":["string"],"blind_spots":"string","accepted":true,"evidence_complete":true,"evidence_convincing":true,"missing_evidence":["string"]}',
+    "JSON schema (reasoning before booleans — think first, then judge):",
+    '{"reviewer":"string","scope":"string","rubric":{"evidence_covers_done_criterion":{"reason":"...","pass":true},"falsification_test_runnable":{"reason":"...","pass":true},"failure_modes_addressed":{"reason":"...","pass":true},"verification_hints_actionable":{"reason":"...","pass":true}},"observations":["string"],"blind_spots":"string","missing_evidence":["string"],"evidence_complete":true,"evidence_convincing":true,"accepted":true}',
     "",
     `Task #${task.id}: ${task.subject}`,
     `Done criterion: ${task.done_criterion}`,
@@ -188,7 +244,7 @@ function buildRobotReviewPrompt(task: any): string {
     priorSection,
     "Output format:",
     "ROBOT_REVIEW_JSON_START",
-    '{"reviewer":"...","scope":"...","observations":["..."],"blind_spots":"...","accepted":true,"evidence_complete":true,"evidence_convincing":true,"missing_evidence":["..."]}',
+    '{"reviewer":"...","scope":"...","rubric":{...},"observations":["..."],"blind_spots":"...","missing_evidence":["..."],"evidence_complete":true,"evidence_convincing":true,"accepted":true}',
     "ROBOT_REVIEW_JSON_END",
   ].join("\n");
 }
@@ -196,10 +252,11 @@ function buildRobotReviewPrompt(task: any): string {
 async function runAutomaticRobotReview(
   task: any,
   signal?: AbortSignal,
+  currentProviderId?: string,
 ): Promise<{ review: Omit<RobotReviewRecord, "iteration">; command: string }> {
   const prompt = buildRobotReviewPrompt(task);
-  const args = ["--mode", "json", "-p", "--no-session"];
-  const reviewerModel = process.env.PI_LGTM_ROBOT_REVIEW_MODEL?.trim();
+  const args = ["--mode", "json", "-p", "--no-session", "--no-tools", "--no-extensions"];
+  const reviewerModel = process.env.PI_LGTM_ROBOT_REVIEW_MODEL?.trim() || pickAlternateReviewerModel(currentProviderId);
   if (reviewerModel) args.push("--model", reviewerModel);
   args.push(prompt);
   const invocation = getPiInvocation(args);
@@ -212,9 +269,22 @@ async function runAutomaticRobotReview(
   const parsed = extractRobotReviewJson(result.stdout);
   const observations = Array.isArray(parsed.observations) ? parsed.observations.filter((item): item is string => typeof item === "string") : [];
   if (observations.length === 0) throw new Error("Robot reviewer returned no observations.");
-  const missing_evidence = Array.isArray(parsed.missing_evidence)
+  const rawMissing: string[] = Array.isArray(parsed.missing_evidence)
     ? parsed.missing_evidence.filter((item): item is string => typeof item === "string")
     : [];
+  const missing_evidence = rawMissing;
+  // Extract rubric with per-item reasoning
+  let rubric: Record<string, { reason: string; pass: boolean }> | undefined;
+  if (parsed.rubric && typeof parsed.rubric === "object") {
+    const r: Record<string, { reason: string; pass: boolean }> = {};
+    for (const [key, val] of Object.entries(parsed.rubric as Record<string, unknown>)) {
+      if (val && typeof val === "object" && "reason" in (val as any) && "pass" in (val as any)) {
+        const v = val as { reason: unknown; pass: unknown };
+        r[key] = { reason: typeof v.reason === "string" ? v.reason : "", pass: v.pass === true };
+      }
+    }
+    if (Object.keys(r).length > 0) rubric = r;
+  }
   return {
     command: commandLabel,
     review: {
@@ -231,12 +301,17 @@ async function runAutomaticRobotReview(
       submitted_at: new Date().toISOString(),
       mode: "auto",
       raw_output: result.stdout.trim(),
+      rubric,
     },
   };
 }
 
 const SYSTEM_REMINDER = `<system-reminder>
-The LGTM sign-off task tools haven't been used recently. If working on tasks, use TaskCreate (requires done_criterion), TaskUpdate for status, and lgtm_ask when ready for human sign-off. Tasks can only be completed via /lgtm after calling lgtm_ask. These are sign-off tasks: agents propose evidence, humans approve. One task per piece of evidence or decision gate. Ignore if not applicable. Never mention this reminder to the user.
+Task tools haven't been used recently. Check the task list and keep it accurate:
+- Mark tasks in_progress when you start them (TaskUpdate status=in_progress).
+- Complete trivial subtasks directly: TaskUpdate(status=completed). Drop irrelevant ones with status=deleted.
+- For significant claims with uncertainty (a feature, an experiment result, run-until-X), call lgtm_ask with evidence — that triggers robot review and a human /lgtm gate.
+A stale list is worse than no list. Ignore this reminder if not applicable. Never mention it to the user.
 </system-reminder>`;
 
 export default function (pi: ExtensionAPI) {
@@ -291,11 +366,14 @@ export default function (pi: ExtensionAPI) {
   let currentTurn = 0;
   let lastTaskToolUseTurn = 0;
   let reminderInjectedThisCycle = false;
+  let currentProvider: string | undefined;
 
   pi.on("turn_start", async (_event, ctx) => {
     currentTurn++;
     widget.setUICtx(ctx.ui as UICtx);
     upgradeStoreIfNeeded(ctx);
+    const model = ctx.model;
+    if (model) currentProvider = (model as any).providerId ?? (model as any).provider;
     if (autoClear.onTurnStart(currentTurn)) widget.update();
   });
 
@@ -369,25 +447,22 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "TaskCreate",
     label: "TaskCreate",
-    description: `Create an LGTM sign-off task with a clear done_criterion.
+    description: `Create a task with a clear done_criterion.
 
-## When to Use
+## Two tiers
 
-- Complex multi-step tasks (3+ steps)
-- When user provides a list of things to do
+- **Tasks**: agent-managed. Trivial bookkeeping (e.g. "monitor pueue 30") can be completed directly via TaskUpdate(status=completed). Subtasks lead up to verification.
+- **LGTMs**: for significant claims with uncertainty (implement a feature, run-until-X). Call lgtm_ask with evidence — that triggers robot review and routes completion through /lgtm.
 
 ## Task Fields
 
 - **subject**: Brief actionable title
 - **description**: Detailed description with context
 - **done_criterion**: REQUIRED. Falsifiable observation that distinguishes done from fail/null/incomplete/silent-fail. State expected AND wrong-case observations (e.g., "All 92 tests pass. If wrong: type errors in build or test failures in task-store.test.ts")
-- **progress_label** (optional): What the agent is currently doing, shown during in-progress tasks
-
-Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
+- **progress_label** (optional): What the agent is currently doing, shown during in-progress tasks`,
     promptGuidelines: [
       "Use TaskCreate for complex tasks. Include a specific done_criterion.",
-      "Mark tasks in_progress before starting. Use lgtm_ask when done.",
-      "Tasks cannot be marked completed directly — human must /lgtm them.",
+      "Mark tasks in_progress before starting. Complete trivial tasks via TaskUpdate; call lgtm_ask for significant claims, then human /lgtm.",
     ],
     parameters: Type.Object({
       subject: Type.String({ description: "Brief task title" }),
@@ -412,24 +487,15 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
   pi.registerTool({
     name: "TaskList",
     label: "TaskList",
-    description: `List all LGTM sign-off tasks. Review badges: ${REVIEW_BADGES.tool}=tool evidence, ${REVIEW_BADGES.robot}=robot review, ${REVIEW_BADGES.human}=pending human sign-off via /lgtm.`,
+    description: `List all tasks grouped by status. Pipeline stages: [🛠🤖👀] = evidence→review→signoff (·=pending).`,
     parameters: Type.Object({}),
 
     execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
       const tasks = store.list();
       if (tasks.length === 0) return Promise.resolve(textResult("No tasks found"));
 
-      const statusOrder: Record<string, number> = { pending: 0, in_progress: 1, completed: 2 };
-      const sorted = [...tasks].sort((a, b) => {
-        const so = (statusOrder[a.status] ?? 0) - (statusOrder[b.status] ?? 0);
-        if (so !== 0) return so;
-        return Number(a.id) - Number(b.id);
-      });
-
-      const lines = sorted.map(task => {
-        let line = `#${task.id} [${task.status}] ${task.subject}`;
-        const reviewBadges = getReviewBadges(task);
-        if (reviewBadges.length > 0) line += ` ${reviewBadges.join(" ")}`;
+      const renderTask = (task: typeof tasks[number]) => {
+        let line = `  #${task.id} ${task.subject} ${getReviewBadges(task)}`;
         if (task.blockedBy.length > 0) {
           const openBlockers = task.blockedBy.filter(bid => {
             const blocker = store.get(bid);
@@ -438,9 +504,25 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
           if (openBlockers.length > 0) line += ` [blocked by ${openBlockers.map(id => "#" + id).join(", ")}]`;
         }
         return line;
-      });
+      };
 
-      return Promise.resolve(textResult(lines.join("\n")));
+      const buckets: { label: string; status: DisplayStatus }[] = [
+        { label: "Active", status: "in_progress" },
+        { label: "Awaiting sign-off", status: "awaiting_signoff" },
+        { label: "Pending", status: "pending" },
+        { label: "Completed", status: "completed" },
+      ];
+
+      const sections: string[] = [];
+      for (const { label, status } of buckets) {
+        const inBucket = tasks
+          .filter(t => getDisplayStatus(t) === status)
+          .sort((a, b) => Number(a.id) - Number(b.id));
+        if (inBucket.length === 0) continue;
+        sections.push(`${label}:\n${inBucket.map(renderTask).join("\n")}`);
+      }
+
+      return Promise.resolve(textResult(sections.join("\n\n")));
     },
   });
 
@@ -461,11 +543,10 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
       if (!task) return Promise.resolve(textResult("Task not found"));
 
       const desc = task.description.replace(/\\n/g, "\n");
-      const reviewBadges = getReviewBadges(task);
       const robotReviews = getRobotReviews(task);
       const lines: string[] = [
         `Task #${task.id}: ${task.subject}`,
-        `Status: ${task.status}${reviewBadges.length ? ` ${reviewBadges.join(" ")}` : ""}${task.pending_approval && task.status !== "completed" ? " (pending human sign-off)" : ""}`,
+        `Status: ${task.status} ${getReviewBadges(task)}${task.pending_approval && task.status !== "completed" ? " (pending human sign-off)" : ""}`,
         `Done criterion: ${task.done_criterion}`,
       ];
       lines.push(`Description: ${desc}`);
@@ -495,19 +576,19 @@ Tasks are completed only via /lgtm after calling lgtm_ask with evidence.`,
   pi.registerTool({
     name: "TaskUpdate",
     label: "TaskUpdate",
-    description: `Update LGTM sign-off task fields or status.
+    description: `Update task fields or status.
 
-Status: pending -> in_progress -> (call lgtm_ask) -> /lgtm -> completed
-
-Cannot set status=completed here. Use lgtm_ask then /lgtm <id>.`,
+Two-tier model:
+- Trivial bookkeeping tasks (e.g. "monitor pueue 30") can be marked completed directly here.
+- Tasks that called lgtm_ask are gated: completion requires /lgtm <id>. Strengthen evidence and re-run lgtm_ask if the robot review rejected it.`,
     parameters: Type.Object({
       taskId: Type.String({ description: "Task ID to update" }),
-      status: Type.Optional(Type.Unsafe<"pending" | "in_progress" | "deleted">({
+      status: Type.Optional(Type.Unsafe<"pending" | "in_progress" | "completed" | "deleted">({
         anyOf: [
-          { type: "string", enum: ["pending", "in_progress"] },
+          { type: "string", enum: ["pending", "in_progress", "completed"] },
           { type: "string", const: "deleted" },
         ],
-        description: "New status. Cannot set completed — use /lgtm after lgtm_ask.",
+        description: "New status. Setting completed is allowed for trivial tasks; tasks with lgtm evidence must complete via /lgtm.",
       })),
       subject: Type.Optional(Type.String({ description: "Brief task title" })),
       description: Type.Optional(Type.String({ description: "Detailed description" })),
@@ -536,8 +617,12 @@ Cannot set status=completed here. Use lgtm_ask then /lgtm <id>.`,
         autoClear.resetBatchCountdown();
       } else if (fields.status === "pending") {
         autoClear.resetBatchCountdown();
+      } else if (fields.status === "completed") {
+        widget.setActiveTask(taskId, false);
+        autoClear.trackCompletion(taskId, currentTurn);
       } else if (fields.status === "deleted") {
         widget.setActiveTask(taskId, false);
+        warnings.push("Task deleted via agent tool. Use /tasks to confirm or undo. Deleting tasks without human sign-off is discouraged — tasks should be completed via /lgtm or explicitly dismissed by the user.");
       }
 
       widget.update();
@@ -559,22 +644,26 @@ Cannot set status=completed here. Use lgtm_ask then /lgtm <id>.`,
 Forces structured thinking about failure modes. All text fields required.
 After this, task enters pending sign-off state — only completable via /lgtm <id>.
 
+## CRITICAL: Evidence must be verbatim
+
+Do NOT summarize or interpret. Paste literal command output, exact log lines, markdown block quotes, table rows, URLs. 'I ran X and it worked' is not evidence — paste the actual output of X. A human must be able to verify from the evidence alone without re-running anything.
+
 ## Fields
 
-- **evidence**: Auditable proof — command output, table, file path, link
+- **evidence**: Verbatim auditable proof — literal output, not summaries
 - **failure_likely**: Most likely way this could be wrong despite evidence
 - **failure_sneaky**: Most perverse or sneaky failure -- one that looks like success superficially, corrupts silently, or only breaks under specific conditions (scale, time, edge case). E.g. feature active but wrong mechanism, works in tests but degrades in prod, correct output for wrong reason.
-- **falsification_test**: What you ran and what you got -- presented so both you and the human can sanity-check it. State: what you ran (command, experiment, log inspection), the actual output or result, and why that result could not occur if a failure mode were real. Must be traceable: include file paths, log snippets, counts, or commit. Human should be able to verify without re-running anything.
-- **verification_hints**: Where to look and what to check. Descriptions of evidence locations, not bare file paths. E.g. "lines 45-60 in src/loss.py show the gradient check" not "src/loss.py".
+- **falsification_test**: What you ran and the literal output you got, with reasoning why that output disproves the failure mode
+- **verification_hints**: Where to look and what to check, with specific content quoted (not bare paths or counts)
 - **remaining_uncertainty**: What's NOT tested, known limitations, deferred edge cases`,
     parameters: Type.Object({
       taskId: Type.String({ description: "Task ID to submit for sign-off" }),
-      evidence: Type.String({ description: "Auditable proof: exact command run + output, commit, config/seeds, file paths. Re-runnable by the human. 'I wrote X' is not evidence -- 'I ran X and got Y' is. Include counts, snippets, test output." }),
-      failure_likely: Type.String({ description: "Most likely way this could be wrong despite evidence" }),
-      failure_sneaky: Type.String({ description: "Most perverse or sneaky failure: looks like success superficially, corrupts silently, or only breaks at scale/time/edge case. E.g. correct output for wrong reason, feature active but wrong mechanism, passes tests but degrades in prod." }),
-      falsification_test: Type.String({ description: "What you ran and what you got, presented so both you and the human can sanity-check it. State: what you ran (command/experiment/log check), the actual output or result, and why that result could not occur if a failure mode were real. Must be traceable: include file paths, log snippets, counts, or commit. The human should be able to verify without re-running anything." }),
-      verification_hints: Type.Array(Type.String(), { description: "Where to look and what to check. Descriptions of evidence locations, not bare file paths. E.g. 'lines 45-60 in src/loss.py show the gradient check' not 'src/loss.py'." }),
-      remaining_uncertainty: Type.String({ description: "What's NOT tested, known limitations, edge cases deferred. If you can't articulate uncertainty, you haven't thought hard enough." }),
+      evidence: Type.String({ description: "Verbatim auditable proof: literal command output, exact log lines, markdown block quotes, table rows, URLs. NOT summaries or interpretations. 'I ran X and got Y' is not evidence -- paste the actual output of X. A human must verify from this alone without re-running. (One short paragraph is fine; verbatim matters more than length.)" }),
+      failure_likely: Type.String({ description: "Most likely way this could be wrong despite evidence. One short sentence preferred — pick the top one, not a list." }),
+      failure_sneaky: Type.String({ description: "Most perverse failure: looks like success superficially, corrupts silently, or only breaks at scale/time/edge case. One short sentence preferred." }),
+      falsification_test: Type.String({ description: "What you ran and the literal output you got. Include verbatim command + output, not 'it worked'. State why that output could not occur if a failure mode were real. Brevity is fine; the verbatim output is what counts." }),
+      verification_hints: Type.Array(Type.String(), { description: "Where to look, with specific content quoted (not bare paths or counts). E.g. 'src/loss.py:45-60 shows grad_norm=0.001'. One or two short hints is enough." }),
+      remaining_uncertainty: Type.String({ description: "What's NOT tested, known limitations, deferred edges. One short sentence preferred. If you can't articulate uncertainty, you haven't thought hard enough." }),
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
@@ -600,7 +689,7 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
       const refreshedTask = store.get(params.taskId);
       if (!refreshedTask) return textResult(`Task #${params.taskId} not found after evidence update`);
       try {
-        const { review, command } = await runAutomaticRobotReview(refreshedTask, signal);
+        const { review, command } = await runAutomaticRobotReview(refreshedTask, signal, currentProvider);
         store.update(params.taskId, {
           pending_approval: review.accepted,
           metadata: appendRobotReviewMetadata(refreshedTask, review),
@@ -611,6 +700,9 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
           `Accepted: ${review.accepted ? "yes" : "no"}\n` +
           `Evidence complete: ${review.evidence_complete ? "yes" : "no"}\n` +
           `Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}\n` +
+          (review.rubric
+            ? `Rubric:\n${Object.entries(review.rubric).map(([k, v]) => `- ${v.pass ? "PASS" : "FAIL"} ${k}: ${v.reason}`).join("\n")}\n`
+            : "") +
           `${review.observations.map(o => `- ${o}`).join("\n")}`;
         if (review.missing_evidence.length > 0) {
           robotReviewNote += `\nMissing evidence:\n${review.missing_evidence.map(item => `- ${item}`).join("\n")}`;
@@ -661,6 +753,7 @@ After this, task enters pending sign-off state — only completable via /lgtm <i
     description: `Attach fresh-perspective robot review observations to a task.
 
 Use this from a separate subagent or model when possible, ideally from a different model family/class than the implementation agent.
+Your role is VALIDATION, not flaw-finding. Sanity-check that the evidence addresses the done criterion. Comment and suggest, but the gate is only the rubric items.
 Observations only: report what you saw, not advice or editorial. Structured gate fields record whether the evidence is complete and convincing enough to advance.
 
 This does not complete the task. Human /lgtm remains the only completion path.`,
@@ -714,7 +807,7 @@ This does not complete the task. Human /lgtm remains the only completion path.`,
         `### Observations\n${params.observations.map(o => `- ${o}`).join("\n")}\n\n` +
         `${(params.missing_evidence?.length ?? 0) > 0 ? `### Missing evidence\n${(params.missing_evidence ?? []).map(item => `- ${item}`).join("\n")}\n\n` : ""}` +
         `### Blind spots\n${params.blind_spots}\n\n` +
-        `${REVIEW_BADGES.robot} Robot review stored. Human sign-off still requires \`/lgtm ${task.id}\`.`;
+        `🤖 Robot review stored. Human sign-off still requires \`/lgtm ${task.id}\`.`;
 
       return Promise.resolve(textResult(result));
     },
@@ -739,7 +832,7 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
         return textResult(`Task #${params.taskId} has no stored evidence yet. Call lgtm_ask first.`);
       }
 
-      const { review, command } = await runAutomaticRobotReview(task, signal);
+      const { review, command } = await runAutomaticRobotReview(task, signal, currentProvider);
       store.update(params.taskId, {
         pending_approval: review.accepted ? task.pending_approval : false,
         metadata: appendRobotReviewMetadata(task, review),
@@ -753,6 +846,9 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
         `Accepted: ${review.accepted ? "yes" : "no"}\n` +
         `Evidence complete: ${review.evidence_complete ? "yes" : "no"}\n` +
         `Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}\n\n` +
+        (review.rubric
+          ? `### Rubric\n${Object.entries(review.rubric).map(([k, v]) => `- ${v.pass ? "PASS" : "FAIL"} ${k}: ${v.reason}`).join("\n")}\n\n`
+          : "") +
         `### Observations\n${review.observations.map(o => `- ${o}`).join("\n")}\n\n` +
         `${review.missing_evidence.length > 0 ? `### Missing evidence\n${review.missing_evidence.map(item => `- ${item}`).join("\n")}\n\n` : ""}` +
         `### Blind spots\n${review.blind_spots}`,
@@ -810,8 +906,7 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
         };
 
         const choices = tasks.map(t => {
-          const badges = getReviewBadges(t);
-          return `${statusIcon(t)} #${t.id} [${t.status}] ${t.subject}${badges.length ? ` ${badges.join(" ")}` : ""}`;
+          return `${statusIcon(t)} #${t.id} [${t.status}] ${t.subject} ${getReviewBadges(t)}`;
         });
         choices.push("← Back");
 
@@ -835,7 +930,7 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
         actions.push("✗ Delete");
         actions.push("← Back");
 
-        const pendingNote = task.pending_approval && task.status !== "completed" ? `\n${REVIEW_BADGES.human} Pending /lgtm sign-off` : "";
+        const pendingNote = task.pending_approval && task.status !== "completed" ? `\n👀 Pending /lgtm sign-off` : "";
         const em = task.metadata;
         let evidenceNote = "";
         if (em.lgtm_evidence) {
@@ -906,11 +1001,11 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
       return;
     }
 
-    // Show stored evidence for review before sign-off
+    // Print evidence to the conversation so the user can review it there
     const m = task.metadata;
     const evidenceParts: string[] = [];
     if (m.lgtm_evidence) {
-      evidenceParts.push(`Evidence:\n${m.lgtm_evidence}`);
+      evidenceParts.push(`**Evidence:**\n${m.lgtm_evidence}`);
       evidenceParts.push(`Failure (likely): ${m.lgtm_failure_likely}`);
       evidenceParts.push(`Failure (sneaky): ${m.lgtm_failure_sneaky}`);
       if (m.lgtm_falsification_test) evidenceParts.push(`Falsification test: ${m.lgtm_falsification_test}`);
@@ -927,9 +1022,11 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
         evidenceParts.push("Latest robot review says the evidence is not yet complete/convincing.");
       }
     }
-    const evidenceSummary = evidenceParts.length > 0 ? evidenceParts.join("\n\n") : "(no stored evidence)";
+    if (evidenceParts.length > 0) {
+      ctx.ui.notify(evidenceParts.join("\n\n"), "info");
+    }
     const confirm = await ctx.ui.select(
-      `Sign off #${taskId}: ${task.subject}\nDone criterion: ${task.done_criterion}\n\n${evidenceSummary}`,
+      `Sign off #${taskId}: ${task.subject}\nDone: ${task.done_criterion}`,
       ["✓ LGTM — sign off", "✗ Cancel"],
     );
     if (confirm !== "✓ LGTM — sign off") return;
@@ -947,10 +1044,35 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
   }
 
   pi.registerCommand("lgtm", {
-    description: "Sign off on a task — /lgtm <id>",
+    description: "Sign off on tasks — /lgtm <id> [<id> ...] or /lgtm * to sign off all pending",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
-      const taskId = args.trim();
-      if (!taskId) {
+      const trimmed = args.trim();
+      if (trimmed === "*") {
+        // Sign off all pending tasks at once
+        const pending = store.list().filter(t => t.pending_approval && t.status !== "completed" && latestRobotReviewPasses(t));
+        if (pending.length === 0) {
+          ctx.ui.notify("No tasks pending sign-off with passing robot review.", "info");
+          return;
+        }
+        const choice = await ctx.ui.select(
+          `Sign off ALL ${pending.length} pending tasks?`,
+          pending.map(t => `#${t.id} ${t.subject}`).concat(["← Cancel"]),
+        );
+        if (!choice || choice === "← Cancel") return;
+        for (const t of pending) {
+          try {
+            store.complete(t.id);
+            autoClear.trackCompletion(t.id, currentTurn);
+            widget.setActiveTask(t.id, false);
+          } catch (err: any) {
+            ctx.ui.notify(`Failed to sign off #${t.id}: ${err.message}`, "error");
+          }
+        }
+        widget.update();
+        ctx.ui.notify(`Signed off ${pending.length} tasks. ✓`, "info");
+        return;
+      }
+      if (!trimmed) {
         const pending = store.list().filter(t => t.pending_approval && t.status !== "completed");
         if (pending.length === 0) {
           ctx.ui.notify("No tasks pending sign-off. Agent must call lgtm_ask first.", "info");
@@ -965,7 +1087,24 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
         if (match) signOff(match[1], ctx);
         return;
       }
-      signOff(taskId, ctx);
+      // Accept one or more whitespace-separated IDs (also tolerate `#1` and commas).
+      const ids = trimmed.split(/[\s,]+/).map(t => t.replace(/^#/, "")).filter(Boolean);
+      if (ids.length === 1) {
+        await signOff(ids[0], ctx);
+        return;
+      }
+      const results: string[] = [];
+      for (const id of ids) {
+        const before = store.get(id);
+        await signOff(id, ctx);
+        const after = store.get(id);
+        if (after?.status === "completed" && before?.status !== "completed") {
+          results.push(`✓ #${id}`);
+        } else {
+          results.push(`✗ #${id}`);
+        }
+      }
+      ctx.ui.notify(`Batch sign-off: ${results.join(", ")}`, "info");
     },
   });
 }

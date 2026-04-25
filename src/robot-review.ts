@@ -15,10 +15,23 @@ export interface RobotReviewRecord {
   submitted_at: string;
   mode: RobotReviewMode;
   raw_output?: string;
+  rubric?: Record<string, { reason: string; pass: boolean }>;
 }
 
 function toStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function extractRubric(value: unknown): Record<string, { reason: string; pass: boolean }> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const r: Record<string, { reason: string; pass: boolean }> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    if (val && typeof val === "object" && "reason" in (val as any) && "pass" in (val as any)) {
+      const v = val as { reason: unknown; pass: unknown };
+      r[key] = { reason: typeof v.reason === "string" ? v.reason : "", pass: v.pass === true };
+    }
+  }
+  return Object.keys(r).length > 0 ? r : undefined;
 }
 
 function normalizeReview(value: unknown, index: number): RobotReviewRecord | undefined {
@@ -44,6 +57,7 @@ function normalizeReview(value: unknown, index: number): RobotReviewRecord | und
     submitted_at: typeof review.submitted_at === "string" ? review.submitted_at : new Date(0).toISOString(),
     mode: review.mode === "auto" ? "auto" : "manual",
     raw_output: typeof review.raw_output === "string" ? review.raw_output : undefined,
+    rubric: extractRubric(review.rubric),
   };
 }
 
@@ -116,3 +130,4 @@ export function latestRobotReviewPasses(task: Task): boolean {
   const latest = getLatestRobotReview(task);
   return latest ? latest.accepted : false;
 }
+

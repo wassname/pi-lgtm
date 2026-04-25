@@ -112,7 +112,7 @@ export class TaskStore {
   }
 
   update(id: string, fields: {
-    status?: Exclude<TaskStatus, "completed"> | "deleted";
+    status?: TaskStatus | "deleted";
     subject?: string;
     description?: string;
     done_criterion?: string;
@@ -129,8 +129,13 @@ export class TaskStore {
       const changedFields: string[] = [];
       const warnings: string[] = [];
 
-      if ((fields.status as string) === "completed") {
-        throw new Error(`Use /lgtm ${id} to complete tasks. Call lgtm_ask first to submit evidence.`);
+      // Self-completion is allowed for trivial tasks that never escalated to lgtm_ask.
+      // Once a task has stored lgtm evidence, completion must go through /lgtm so the
+      // human gate + robot review can't be skipped.
+      if (fields.status === "completed") {
+        if (task.pending_approval || task.metadata?.lgtm_evidence) {
+          throw new Error(`Use /lgtm ${id} to complete this task — it has lgtm evidence pending review.`);
+        }
       }
 
       if (fields.status === "deleted") {

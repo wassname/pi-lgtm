@@ -168,9 +168,25 @@ describe("TaskStore (in-memory)", () => {
     expect(store.list()[0].id).toBe("2");
   });
 
-  it("throws on update status=completed (must use /lgtm)", () => {
-    store.create("Test", "Desc", "done");
-    expect(() => store.update("1", { status: "completed" as any })).toThrow("Use /lgtm");
+  it("allows TaskUpdate(status=completed) for trivial tasks (no lgtm evidence)", () => {
+    store.create("Trivial", "Desc", "done");
+    const { task, changedFields } = store.update("1", { status: "completed" });
+    expect(task!.status).toBe("completed");
+    expect(changedFields).toContain("status");
+  });
+
+  it("blocks TaskUpdate(status=completed) when pending_approval=true", () => {
+    store.create("Significant", "Desc", "done");
+    store.update("1", { pending_approval: true });
+    expect(() => store.update("1", { status: "completed" })).toThrow("/lgtm");
+  });
+
+  it("blocks TaskUpdate(status=completed) when lgtm evidence is stored (even if review rejected)", () => {
+    store.create("Escalated", "Desc", "done");
+    // lgtm_ask path stores evidence; if robot review rejects, pending_approval becomes false.
+    // The agent must not be able to bypass the gate by self-completing afterwards.
+    store.update("1", { metadata: { lgtm_evidence: "literal output" }, pending_approval: false });
+    expect(() => store.update("1", { status: "completed" })).toThrow("/lgtm");
   });
 
   it("returns not found for update on non-existent task", () => {

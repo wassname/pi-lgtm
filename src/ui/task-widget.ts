@@ -9,7 +9,7 @@
  */
 
 import { truncateToWidth } from "@mariozechner/pi-tui";
-import { getReviewBadges } from "../review-badges.js";
+import { getDisplayStatus, getReviewBadges } from "../review-badges.js";
 import type { TaskStore } from "../task-store.js";
 
 // ---- Types ----
@@ -125,15 +125,15 @@ export class TaskWidget {
 
     if (tasks.length === 0) return [];
 
-    const completed = tasks.filter(t => t.status === "completed");
-    const inProgress = tasks.filter(t => t.status === "in_progress");
-    const pending = tasks.filter(t => t.status === "pending");
+    const counts = { completed: 0, awaiting_signoff: 0, in_progress: 0, pending: 0 };
+    for (const t of tasks) counts[getDisplayStatus(t)]++;
 
     const parts: string[] = [];
-    if (completed.length > 0) parts.push(`${completed.length} done`);
-    if (inProgress.length > 0) parts.push(`${inProgress.length} in progress`);
-    if (pending.length > 0) parts.push(`${pending.length} open`);
-    const statusText = `${tasks.length} lgtm's (${parts.join(", ")})`;
+    if (counts.completed > 0) parts.push(`${counts.completed} done`);
+    if (counts.awaiting_signoff > 0) parts.push(`${counts.awaiting_signoff} awaiting sign-off`);
+    if (counts.in_progress > 0) parts.push(`${counts.in_progress} in progress`);
+    if (counts.pending > 0) parts.push(`${counts.pending} open`);
+    const statusText = `${tasks.length} tasks (${parts.join(", ")})`;
 
     const spinnerChar = SPINNER[this.widgetFrame % SPINNER.length];
     const lines: string[] = [truncate(theme.fg("accent", "●") + " " + theme.fg("accent", statusText))];
@@ -142,8 +142,7 @@ export class TaskWidget {
     for (let i = 0; i < visible.length; i++) {
       const task = visible[i];
       const isActive = this.activeTaskIds.has(task.id) && task.status === "in_progress";
-      const reviewBadges = getReviewBadges(task);
-      const reviewSuffix = reviewBadges.length > 0 ? ` ${reviewBadges.join(" ")}` : "";
+      const reviewSuffix = ` ${getReviewBadges(task)}`;
 
       let icon: string;
       if (isActive) {
@@ -194,7 +193,7 @@ export class TaskWidget {
       }
 
       lines.push(truncate(text + suffix));
-      if (!isActive && task.status !== "completed" && (task as any).done_criterion) {
+      if (task.status !== "completed" && (task as any).done_criterion) {
         lines.push(truncate(`       test: ${(task as any).done_criterion}`));
       }
     }

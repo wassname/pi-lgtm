@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getReviewBadges, REVIEW_BADGES } from "../src/review-badges.js";
+import { getDisplayStatus, getReviewBadges } from "../src/review-badges.js";
 import type { Task } from "../src/types.js";
 
 function makeTask(overrides: Partial<Task> = {}): Task {
@@ -21,11 +21,11 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 }
 
 describe("getReviewBadges", () => {
-  it("returns no badges when no review artifacts exist", () => {
-    expect(getReviewBadges(makeTask())).toEqual([]);
+  it("renders all dots when no artifacts exist", () => {
+    expect(getReviewBadges(makeTask())).toBe("[···]");
   });
 
-  it("returns tool, robot, and human badges independently", () => {
+  it("fills tool/robot/human slots independently", () => {
     const task = makeTask({
       pending_approval: true,
       metadata: {
@@ -46,11 +46,7 @@ describe("getReviewBadges", () => {
       },
     });
 
-    expect(getReviewBadges(task)).toEqual([
-      REVIEW_BADGES.tool,
-      REVIEW_BADGES.robot,
-      REVIEW_BADGES.human,
-    ]);
+    expect(getReviewBadges(task)).toBe("[🛠🤖👀]");
   });
 
   it("hides the human badge once the task is completed", () => {
@@ -60,6 +56,26 @@ describe("getReviewBadges", () => {
       metadata: { lgtm_evidence: "ok" },
     });
 
-    expect(getReviewBadges(task)).toEqual([REVIEW_BADGES.tool]);
+    expect(getReviewBadges(task)).toBe("[🛠··]");
+  });
+});
+
+describe("getDisplayStatus", () => {
+  it("returns pending for fresh tasks", () => {
+    expect(getDisplayStatus(makeTask())).toBe("pending");
+  });
+
+  it("returns in_progress for active tasks not yet escalated", () => {
+    expect(getDisplayStatus(makeTask({ status: "in_progress" }))).toBe("in_progress");
+  });
+
+  it("returns awaiting_signoff when pending_approval is set", () => {
+    expect(getDisplayStatus(makeTask({ status: "in_progress", pending_approval: true })))
+      .toBe("awaiting_signoff");
+  });
+
+  it("returns completed regardless of pending_approval flag", () => {
+    expect(getDisplayStatus(makeTask({ status: "completed", pending_approval: true })))
+      .toBe("completed");
   });
 });
