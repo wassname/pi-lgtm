@@ -17,8 +17,9 @@
  *
  * Commands:
  *   /tasks            — Interactive task management menu
- *   /lgtm <id...>     — Human signs off on one or more tasks
- *   /lgtm *           — Sign off all tasks awaiting human review with passing robot review
+ *   /lgtm <id...>     — Human signs off on one or more tasks (override allowed even without lgtm_ask)
+ *   /lgtm *           — Sign off ALL open tasks (READY/ACTIVE/PENDING) after a grouped confirm
+ *   /lgtm             — Pick from any open task (with [READY]/[ACTIVE]/[PENDING] tags)
  */
 
 import { spawn } from "node:child_process";
@@ -26,7 +27,7 @@ import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { AutoClearManager } from "./auto-clear.js";
-import { type DisplayStatus, getDisplayStatus, getReviewBadges } from "./review-badges.js";
+import { type DisplayStatus, getDisplayStatus, getReviewBadges, getStateTag } from "./review-badges.js";
 import {
   appendRobotReviewMetadata,
   getLatestRobotReview,
@@ -487,7 +488,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "TaskList",
     label: "TaskList",
-    description: `List all tasks grouped by status. Pipeline stages: [🛠🤖👀] = evidence→review→signoff (·=pending).`,
+    description: `List all tasks grouped by status. State tag: [READY] (signoff-ready) [ACTIVE] [PENDING] [DONE]. Pipeline stages: [🛠🤖👀] = evidence→review→signoff (·=pending).`,
     parameters: Type.Object({}),
 
     execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
@@ -495,7 +496,7 @@ export default function (pi: ExtensionAPI) {
       if (tasks.length === 0) return Promise.resolve(textResult("No tasks found"));
 
       const renderTask = (task: typeof tasks[number]) => {
-        let line = `  #${task.id} ${task.subject} ${getReviewBadges(task)}`;
+        let line = `  [${getStateTag(task).padEnd(7)}] #${task.id} ${task.subject} ${getReviewBadges(task)}`;
         if (task.blockedBy.length > 0) {
           const openBlockers = task.blockedBy.filter(bid => {
             const blocker = store.get(bid);
@@ -992,17 +993,14 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
     const task = store.get(taskId);
     if (!task) { ctx.ui.notify(`Task #${taskId} not found`, "error"); return; }
     if (task.status === "completed") { ctx.ui.notify(`Task #${taskId} already completed`, "info"); return; }
-    if (!task.pending_approval) {
-      ctx.ui.notify(`Task #${taskId} not ready. Agent must call lgtm_ask first.`, "error");
-      return;
-    }
-    if (getRobotReviews(task).length > 0 && !latestRobotReviewPasses(task)) {
-      ctx.ui.notify(`Task #${taskId} is blocked by the latest robot review. Strengthen evidence and rerun review first.`, "error");
-      return;
-    }
+
+    // Build human-visible state summary (the human is the final gate; we just surface friction).
+    const m = task.metadata;
+    const robotReviews = getRobotReviews(task);
+    const noEvidence = !task.pending_approval && !m.lgtm_evidence;
+    const robotRejected = robotReviews.length > 0 && !latestRobotReviewPasses(task);
 
     // Print evidence to the conversation so the user can review it there
-    const m = task.metadata;
     const evidenceParts: string[] = [];
     if (m.lgtm_evidence) {
       evidenceParts.push(`**Evidence:**\n${m.lgtm_evidence}`);
@@ -1012,24 +1010,32 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
       if (m.lgtm_remaining_uncertainty) evidenceParts.push(`Remaining uncertainty: ${m.lgtm_remaining_uncertainty}`);
       if (m.lgtm_verification_hints?.length) evidenceParts.push(`Hints: ${m.lgtm_verification_hints.join(", ")}`);
       evidenceParts.push(`Submitted: ${m.lgtm_submitted_at}`);
+    } else {
+      evidenceParts.push(`(No agent-submitted evidence — agent never called lgtm_ask. Human override.)`);
     }
-    const robotReviews = getRobotReviews(task);
     if (robotReviews.length > 0) {
       evidenceParts.push(
         `Robot reviews (${robotReviews.length} total):\n${robotReviews.map(formatRobotReview).join("\n\n")}`,
       );
-      if (!latestRobotReviewPasses(task)) {
-        evidenceParts.push("Latest robot review says the evidence is not yet complete/convincing.");
+      if (robotRejected) {
+        evidenceParts.push("⚠ Latest robot review says the evidence is not yet complete/convincing.");
       }
     }
     if (evidenceParts.length > 0) {
       ctx.ui.notify(evidenceParts.join("\n\n"), "info");
     }
-    const confirm = await ctx.ui.select(
-      `Sign off #${taskId}: ${task.subject}\nDone: ${task.done_criterion}`,
-      ["✓ LGTM — sign off", "✗ Cancel"],
-    );
-    if (confirm !== "✓ LGTM — sign off") return;
+
+    let title = `Sign off #${taskId}: ${task.subject}\nDone: ${task.done_criterion}`;
+    let signLabel = "✓ LGTM — sign off";
+    if (noEvidence) {
+      title = `⚠ Task #${taskId} has no agent-submitted evidence.\nSign off anyway?\nDone: ${task.done_criterion}`;
+      signLabel = "✓ Override — sign off without evidence";
+    } else if (robotRejected) {
+      title = `⚠ Task #${taskId} robot review rejected the evidence.\nSign off anyway?\nDone: ${task.done_criterion}`;
+      signLabel = "✓ Override — sign off despite rejected review";
+    }
+    const confirm = await ctx.ui.select(title, [signLabel, "✗ Cancel"]);
+    if (confirm !== signLabel) return;
 
     try {
       store.complete(taskId);
@@ -1044,43 +1050,76 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
   }
 
   pi.registerCommand("lgtm", {
-    description: "Sign off on tasks — /lgtm <id> [<id> ...] or /lgtm * to sign off all pending",
+    description:
+      "Sign off on tasks. /lgtm <id> [<id>...] signs specific tasks; /lgtm * signs ALL open tasks (READY + ACTIVE + PENDING) after confirmation. Human override allowed even when the agent never called lgtm_ask.",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const trimmed = args.trim();
       if (trimmed === "*") {
-        // Sign off all pending tasks at once
-        const pending = store.list().filter(t => t.pending_approval && t.status !== "completed" && latestRobotReviewPasses(t));
-        if (pending.length === 0) {
-          ctx.ui.notify("No tasks pending sign-off with passing robot review.", "info");
+        // Sign off all open (non-completed) tasks at once. Human is the final gate.
+        const open = store.list().filter(t => t.status !== "completed");
+        if (open.length === 0) {
+          ctx.ui.notify("No open tasks to sign off.", "info");
           return;
         }
+        const groups: Record<DisplayStatus, typeof open> = {
+          awaiting_signoff: [],
+          in_progress: [],
+          pending: [],
+          completed: [],
+        };
+        for (const t of open) groups[getDisplayStatus(t)].push(t);
+        const groupLabel: Record<DisplayStatus, string> = {
+          awaiting_signoff: "READY (robot ✓)",
+          in_progress: "ACTIVE (no /lgtm evidence)",
+          pending: "PENDING (not started)",
+          completed: "DONE",
+        };
+        const lines: string[] = [];
+        for (const status of ["awaiting_signoff", "in_progress", "pending"] as DisplayStatus[]) {
+          const inBucket = groups[status];
+          if (inBucket.length === 0) continue;
+          lines.push(`  ${groupLabel[status]}:`);
+          for (const t of inBucket) {
+            const warn = status === "awaiting_signoff" && !latestRobotReviewPasses(t) ? " ⚠ robot rejected" : "";
+            lines.push(`    #${t.id} ${t.subject}${warn}`);
+          }
+        }
+        ctx.ui.notify(`About to sign off ALL ${open.length} open tasks:\n${lines.join("\n")}`, "info");
         const choice = await ctx.ui.select(
-          `Sign off ALL ${pending.length} pending tasks?`,
-          pending.map(t => `#${t.id} ${t.subject}`).concat(["← Cancel"]),
+          `Sign off ALL ${open.length} open tasks?`,
+          [`✓ Sign off all ${open.length}`, "← Cancel"],
         );
         if (!choice || choice === "← Cancel") return;
-        for (const t of pending) {
+        let signed = 0;
+        for (const t of open) {
           try {
             store.complete(t.id);
             autoClear.trackCompletion(t.id, currentTurn);
             widget.setActiveTask(t.id, false);
+            signed++;
           } catch (err: any) {
             ctx.ui.notify(`Failed to sign off #${t.id}: ${err.message}`, "error");
           }
         }
         widget.update();
-        ctx.ui.notify(`Signed off ${pending.length} tasks. ✓`, "info");
+        ctx.ui.notify(`Signed off ${signed}/${open.length} tasks. ✓`, "info");
         return;
       }
       if (!trimmed) {
-        const pending = store.list().filter(t => t.pending_approval && t.status !== "completed");
-        if (pending.length === 0) {
-          ctx.ui.notify("No tasks pending sign-off. Agent must call lgtm_ask first.", "info");
+        const open = store.list().filter(t => t.status !== "completed");
+        if (open.length === 0) {
+          ctx.ui.notify("No open tasks. Use /lgtm * to confirm-clear everything, or /lgtm <id>.", "info");
           return;
         }
+        const tag = (t: typeof open[number]) => {
+          const s = getDisplayStatus(t);
+          if (s === "awaiting_signoff") return "[READY]   ";
+          if (s === "in_progress") return "[ACTIVE]  ";
+          return "[PENDING] ";
+        };
         const choice = await ctx.ui.select(
-          "Sign off on:",
-          pending.map(t => `#${t.id} ${t.subject}`).concat(["← Cancel"]),
+          "Sign off on (any open task — human override allowed):",
+          open.map(t => `${tag(t)}#${t.id} ${t.subject}`).concat(["← Cancel"]),
         );
         if (!choice || choice === "← Cancel") return;
         const match = choice.match(/#(\d+)/);

@@ -191,13 +191,12 @@ export class TaskStore {
     });
   }
 
-  /** Complete a task. Called only by /lgtm -- requires pending_approval=true. */
+  /** Complete a task. Called only by /lgtm. The human-confirm gate lives in the command layer. */
   complete(id: string): Task {
     return this.withLock(() => {
       const task = this.tasks.get(id);
       if (!task) throw new Error(`Task #${id} not found`);
       if (task.status === "completed") throw new Error(`Task #${id} already completed`);
-      if (!task.pending_approval) throw new Error(`Task #${id} not ready. Agent must call lgtm_ask first.`);
       task.status = "completed";
       task.updatedAt = Date.now();
       return task;

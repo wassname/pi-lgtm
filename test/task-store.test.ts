@@ -195,9 +195,11 @@ describe("TaskStore (in-memory)", () => {
     expect(changedFields).toEqual([]);
   });
 
-  it("complete() requires pending_approval", () => {
+  it("complete() works without pending_approval (human override path)", () => {
+    // The /lgtm command layer is the human gate; complete() itself is permissive.
     store.create("Test", "Desc", "done");
-    expect(() => store.complete("1")).toThrow("lgtm_ask");
+    const task = store.complete("1");
+    expect(task.status).toBe("completed");
   });
 
   it("complete() works when pending_approval=true", () => {

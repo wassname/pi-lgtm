@@ -9,7 +9,7 @@
  */
 
 import { truncateToWidth } from "@mariozechner/pi-tui";
-import { getDisplayStatus, getReviewBadges } from "../review-badges.js";
+import { getDisplayStatus, getReviewBadges, getStateTag, getStateTagColor } from "../review-badges.js";
 import type { TaskStore } from "../task-store.js";
 
 // ---- Types ----
@@ -143,6 +143,11 @@ export class TaskWidget {
       const task = visible[i];
       const isActive = this.activeTaskIds.has(task.id) && task.status === "in_progress";
       const reviewSuffix = ` ${getReviewBadges(task)}`;
+      const tag = getStateTag(task);
+      // [READY  ] [ACTIVE ] [PENDING] [DONE   ] — pad so columns line up.
+      const tagColour = getStateTagColor(tag);
+      const tagBox = `[${tag.padEnd(7)}]`;
+      const tagPrefix = (tagColour ? theme.fg(tagColour, tagBox) : tagBox) + " ";
 
       let icon: string;
       if (isActive) {
@@ -182,14 +187,14 @@ export class TaskWidget {
             ? ` ${theme.fg("dim", `(${elapsed} · ${tokenParts.join(" ")})`)}`
             : ` ${theme.fg("dim", `(${elapsed})`)}`;
         }
-        text = `  ${icon} ${theme.fg("dim", "#" + task.id)} ${theme.fg("accent", form + agentLabel + "…")}${reviewSuffix}${stats}`;
+        text = `  ${icon} ${tagPrefix}${theme.fg("dim", "#" + task.id)} ${theme.fg("accent", form + agentLabel + "…")}${reviewSuffix}${stats}`;
       } else if (task.status === "completed") {
-        text = `  ${icon} ${theme.fg("dim", theme.strikethrough("#" + task.id + " " + task.subject))}${reviewSuffix}`;
+        text = `  ${icon} ${tagPrefix}${theme.fg("dim", theme.strikethrough("#" + task.id + " " + task.subject))}${reviewSuffix}`;
       } else {
         const agentSuffix = task.status === "in_progress" && task.metadata?.agentId
           ? theme.fg("dim", ` (agent ${task.metadata.agentId.slice(0, 5)})`)
           : "";
-        text = `  ${icon} ${theme.fg("dim", "#" + task.id)} ${task.subject}${agentSuffix}${reviewSuffix}`;
+        text = `  ${icon} ${tagPrefix}${theme.fg("dim", "#" + task.id)} ${task.subject}${agentSuffix}${reviewSuffix}`;
       }
 
       lines.push(truncate(text + suffix));
