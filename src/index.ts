@@ -24,7 +24,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
@@ -262,6 +262,46 @@ interface EvidenceIterationRecord {
   automatic_review_failure?: { message: string; raw_output?: string };
 }
 
+const AUTOMATIC_REVIEW_ERROR_KEYS = [
+  "robot_review_last_error",
+  "robot_review_last_error_output",
+  "robot_review_last_error_at",
+] as const;
+
+const ROBOT_REVIEW_KEYS = [
+  "robot_reviews",
+  "robot_review_reviewer",
+  "robot_review_scope",
+  "robot_review_observations",
+  "robot_review_blind_spots",
+  "robot_review_accepted",
+  "robot_review_evidence_complete",
+  "robot_review_evidence_convincing",
+  "robot_review_missing_evidence",
+  "robot_review_submitted_at",
+  "robot_review_mode",
+  "robot_review_raw_output",
+  "robot_review_requires_followup",
+  "robot_review_iteration_count",
+] as const;
+
+const CURRENT_EVIDENCE_KEYS = [
+  "lgtm_evidence",
+  "lgtm_failure_likely",
+  "lgtm_failure_sneaky",
+  "lgtm_falsification_test",
+  "lgtm_verification_hints",
+  "lgtm_remaining_uncertainty",
+  "lgtm_submitted_at",
+  "lgtm_commands",
+  "lgtm_evidence_artifacts",
+  "lgtm_falsification_artifacts",
+] as const;
+
+function nullRecord(keys: readonly string[]): Record<string, null> {
+  return Object.fromEntries(keys.map((key) => [key, null]));
+}
+
 function getAutomaticReviewFailureMetadata(message: string, rawOutput?: string): Record<string, unknown> {
   return {
     robot_review_last_error: message,
@@ -271,45 +311,15 @@ function getAutomaticReviewFailureMetadata(message: string, rawOutput?: string):
 }
 
 function clearAutomaticReviewFailureMetadata(): Record<string, unknown> {
-  return {
-    robot_review_last_error: null,
-    robot_review_last_error_output: null,
-    robot_review_last_error_at: null,
-  };
+  return nullRecord(AUTOMATIC_REVIEW_ERROR_KEYS);
 }
 
 function clearRobotReviewMetadata(): Record<string, unknown> {
-  return {
-    robot_reviews: null,
-    robot_review_reviewer: null,
-    robot_review_scope: null,
-    robot_review_observations: null,
-    robot_review_blind_spots: null,
-    robot_review_accepted: null,
-    robot_review_evidence_complete: null,
-    robot_review_evidence_convincing: null,
-    robot_review_missing_evidence: null,
-    robot_review_submitted_at: null,
-    robot_review_mode: null,
-    robot_review_raw_output: null,
-    robot_review_requires_followup: null,
-    robot_review_iteration_count: null,
-  };
+  return nullRecord(ROBOT_REVIEW_KEYS);
 }
 
 function clearCurrentEvidenceMetadata(): Record<string, unknown> {
-  return {
-    lgtm_evidence: null,
-    lgtm_failure_likely: null,
-    lgtm_failure_sneaky: null,
-    lgtm_falsification_test: null,
-    lgtm_verification_hints: null,
-    lgtm_remaining_uncertainty: null,
-    lgtm_submitted_at: null,
-    lgtm_commands: null,
-    lgtm_evidence_artifacts: null,
-    lgtm_falsification_artifacts: null,
-  };
+  return nullRecord(CURRENT_EVIDENCE_KEYS);
 }
 
 function normalizeCommandRecords(value: unknown): EvidenceCommandRecord[] {
@@ -342,9 +352,12 @@ function normalizeArtifactRecords(value: unknown): EvidenceArtifactRecord[] {
 export function buildArtifactRecords(paths?: string[]): EvidenceArtifactRecord[] {
   return (paths ?? []).map((path) => {
     const resolvedPath = resolve(path);
-    const bytes = statSync(resolvedPath).size;
-    const sha256 = createHash("sha256").update(readFileSync(resolvedPath)).digest("hex");
-    return { path: resolvedPath, sha256, bytes };
+    const content = readFileSync(resolvedPath);
+    return {
+      path: resolvedPath,
+      sha256: createHash("sha256").update(content).digest("hex"),
+      bytes: content.length,
+    };
   });
 }
 

@@ -75,6 +75,7 @@ Out: full schema/tool-calling reviewer redesign, giant workflow/state-machine re
 - 2026-06-07: Verification passed with `npm test`, `npm run typecheck`, and `npm run lint`.
 - 2026-06-07: Second batch added structured command/artifact metadata, explicit `completion mode` and `review state`, evidence history with supersede reasons, and a dedicated `lgtm_supersede` tool.
 - 2026-06-07: Second-batch verification passed with `npm test -- test/review-badges.test.ts test/robot-review.test.ts test/task-store.test.ts`, then full `npm run lint && npm run typecheck && npm test`.
+- 2026-06-07: Skipped the bigger reviewer-output redesign. Did a smaller cleanup pass instead: consolidated metadata-clearing helpers and simplified artifact hashing without changing behavior.
 
 ## TODO
 - Full reviewer tool-calling/schema enforcement is still probably a separate refactor if parse brittleness returns.
