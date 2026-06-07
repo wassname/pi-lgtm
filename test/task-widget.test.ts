@@ -73,7 +73,7 @@ describe("TaskWidget", () => {
     widget.update();
 
     const lines = renderWidget(ui.state);
-    expect(lines).toHaveLength(2); // header + 1 task
+    expect(lines).toHaveLength(3); // header + 1 task + done_criterion
     expect(lines[0]).toContain("1 tasks");
     expect(lines[0]).toContain("1 open");
     expect(lines[1]).toContain("◻");
@@ -129,18 +129,20 @@ describe("TaskWidget", () => {
   it("shows blocked-by info for pending tasks", () => {
     store.create("Blocker", "Desc", "done");
     store.create("Blocked", "Desc", "done");
-    store.update("2", { addBlockedBy: ["1"] });
+    store.update("2", { add_blocked_by: ["1"] });
     widget.update();
 
     const lines = renderWidget(ui.state);
     const blockedLine = lines.find(l => l.includes("Blocked"));
+    // blocked-by suffix is only added via dim theme helper, which in mock is identity
+    // So we should see the raw text. Check for the relevant subject line having blocked-by info
     expect(blockedLine).toContain("blocked by #1");
   });
 
   it("hides completed blockers in blocked-by suffix", () => {
     store.create("Blocker", "Desc", "done");
     store.create("Blocked", "Desc", "done");
-    store.update("2", { addBlockedBy: ["1"] });
+    store.update("2", { add_blocked_by: ["1"] });
     store.update("1", { pending_approval: true });
     store.complete("1");
     widget.update();
@@ -178,14 +180,14 @@ describe("TaskWidget", () => {
 
   it("limits visible tasks to MAX_VISIBLE_TASKS", () => {
     for (let i = 0; i < 15; i++) {
-      store.create(`Task ${i + 1}`, "Desc");
+      store.create(`Task ${i + 1}`, "Desc", "done");
     }
     widget.update();
 
     const lines = renderWidget(ui.state);
-    // header + 10 tasks + "… and 5 more"
+    // header + 5 visible tasks (each has 2 lines: task + done_criterion) + "...and 10 more"
     expect(lines).toHaveLength(12);
-    expect(lines[11]).toContain("5 more");
+    expect(lines[11]).toContain("10 more");
   });
 
   it("tracks token usage for active tasks", () => {
@@ -244,7 +246,7 @@ describe("TaskWidget", () => {
 
     const lines = renderWidget(ui.state);
     expect(lines[1]).toContain("Processing A…");
-    expect(lines[2]).toContain("Processing B…");
+    expect(lines[3]).toContain("Processing B…");
   });
 
   it("distributes token usage across all active tasks", () => {
@@ -260,7 +262,7 @@ describe("TaskWidget", () => {
     const lines = renderWidget(ui.state);
     // Both tasks should have the same token counts
     expect(lines[1]).toContain("↑ 100");
-    expect(lines[2]).toContain("↑ 100");
+    expect(lines[3]).toContain("↑ 100");
   });
 
   it("dispose clears widget and timer", () => {

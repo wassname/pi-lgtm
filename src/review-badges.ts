@@ -1,4 +1,4 @@
-import { getRobotReviews } from "./robot-review.js";
+import { getLatestRobotReview, getRobotReviews } from "./robot-review.js";
 import type { Task } from "./types.js";
 
 const STAGES = ["🛠", "🤖", "👀"] as const;
@@ -14,6 +14,13 @@ export function getReviewBadges(task: Task): string {
   return `[${slots.join("")}]`;
 }
 
+export const REVIEW_BADGES = {
+  evidence: STAGES[0],
+  robot: STAGES[1],
+  human: STAGES[2],
+  pipeline: STAGES,
+};
+
 export type DisplayStatus = "awaiting_signoff" | "in_progress" | "pending" | "completed";
 
 /** Derived display bucket. `awaiting_signoff` is pending_approval && !completed. */
@@ -24,6 +31,19 @@ export function getDisplayStatus(task: Task): DisplayStatus {
 }
 
 export type StateTag = "READY" | "ACTIVE" | "PENDING" | "DONE";
+
+export function getGateStatus(task: Task): string {
+  if (task.status === "completed") return "human signed off";
+  if (!task.metadata?.lgtm_evidence) return "no lgtm evidence submitted";
+  if (task.pending_approval) return `ready for human sign-off via /lgtm ${task.id}`;
+  if (typeof task.metadata?.robot_review_last_error === "string") {
+    return `blocked: automatic robot review failed: ${task.metadata.robot_review_last_error}`;
+  }
+  const latest = getLatestRobotReview(task);
+  if (latest && !latest.accepted) return "blocked: latest robot review rejected the evidence";
+  if (latest?.accepted) return "accepted robot review present, but the human gate is still closed";
+  return "blocked: evidence submitted, robot review still required";
+}
 
 /** Short uppercase tag for the human ("can I /lgtm this?" at a glance). */
 export function getStateTag(task: Task): StateTag {

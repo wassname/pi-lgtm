@@ -34,7 +34,7 @@ describe("TaskStore (in-memory)", () => {
   it("creates tasks with optional fields", () => {
     const t = store.create("Task", "Desc", "done criterion", "Running task", { key: "value" });
 
-    expect(t.activeForm).toBe("Running task");
+    expect(t.progress_label).toBe("Running task");
     expect(t.metadata).toEqual({ key: "value" });
   });
 
@@ -72,16 +72,16 @@ describe("TaskStore (in-memory)", () => {
     const { changedFields } = store.update("1", {
       subject: "Updated subject",
       description: "Updated desc",
-      owner: "agent-1",
+      metadata: { owner: "agent-1" },
     });
 
     expect(changedFields).toContain("subject");
     expect(changedFields).toContain("description");
-    expect(changedFields).toContain("owner");
+    expect(changedFields).toContain("metadata");
 
     const task = store.get("1")!;
     expect(task.subject).toBe("Updated subject");
-    expect(task.owner).toBe("agent-1");
+    expect(task.metadata.owner).toBe("agent-1");
   });
 
   it("deletes a task with status: deleted", () => {
@@ -114,7 +114,7 @@ describe("TaskStore (in-memory)", () => {
     store.create("Blocker", "Desc", "done");
     store.create("Blocked", "Desc", "done");
 
-    store.update("1", { addBlocks: ["2"] });
+    store.update("1", { add_blocks: ["2"] });
 
     const t1 = store.get("1")!;
     const t2 = store.get("2")!;
@@ -126,7 +126,7 @@ describe("TaskStore (in-memory)", () => {
     store.create("Blocker", "Desc", "done");
     store.create("Blocked", "Desc", "done");
 
-    store.update("2", { addBlockedBy: ["1"] });
+    store.update("2", { add_blocked_by: ["1"] });
 
     const t1 = store.get("1")!;
     const t2 = store.get("2")!;
@@ -138,8 +138,8 @@ describe("TaskStore (in-memory)", () => {
     store.create("A", "Desc", "done");
     store.create("B", "Desc", "done");
 
-    store.update("1", { addBlocks: ["2"] });
-    store.update("1", { addBlocks: ["2"] }); // duplicate
+    store.update("1", { add_blocks: ["2"] });
+    store.update("1", { add_blocks: ["2"] }); // duplicate
 
     const t1 = store.get("1")!;
     expect(t1.blocks.filter(id => id === "2")).toHaveLength(1);
@@ -148,7 +148,7 @@ describe("TaskStore (in-memory)", () => {
   it("cleans up dependency edges on deletion", () => {
     store.create("A", "Desc", "done");
     store.create("B", "Desc", "done");
-    store.update("1", { addBlocks: ["2"] });
+    store.update("1", { add_blocks: ["2"] });
 
     store.update("1", { status: "deleted" });
 
@@ -230,8 +230,8 @@ describe("TaskStore (in-memory)", () => {
   it("allows circular dependencies with warning", () => {
     store.create("A", "Desc", "done");
     store.create("B", "Desc", "done");
-    store.update("1", { addBlocks: ["2"] });
-    const { warnings } = store.update("2", { addBlocks: ["1"] });
+    store.update("1", { add_blocks: ["2"] });
+    const { warnings } = store.update("2", { add_blocks: ["1"] });
 
     expect(store.get("1")!.blocks).toContain("2");
     expect(store.get("2")!.blocks).toContain("1");
@@ -240,14 +240,14 @@ describe("TaskStore (in-memory)", () => {
 
   it("allows self-dependency with warning", () => {
     store.create("Self", "Desc", "done");
-    const { warnings } = store.update("1", { addBlocks: ["1"] });
+    const { warnings } = store.update("1", { add_blocks: ["1"] });
     expect(store.get("1")!.blocks).toContain("1");
     expect(warnings).toContain("#1 blocks itself");
   });
 
   it("stores dangling edge IDs with warning", () => {
     store.create("Real", "Desc", "done");
-    const { warnings } = store.update("1", { addBlocks: ["9999"] });
+    const { warnings } = store.update("1", { add_blocks: ["9999"] });
     expect(store.get("1")!.blocks).toContain("9999");
     expect(warnings).toContain("#9999 does not exist");
   });
@@ -255,7 +255,7 @@ describe("TaskStore (in-memory)", () => {
   it("returns no warnings for valid dependencies", () => {
     store.create("A", "Desc", "done");
     store.create("B", "Desc", "done");
-    const { warnings } = store.update("1", { addBlocks: ["2"] });
+    const { warnings } = store.update("1", { add_blocks: ["2"] });
     expect(warnings).toEqual([]);
   });
 
@@ -264,11 +264,11 @@ describe("TaskStore (in-memory)", () => {
     expect(t.subject).toBe("   ");
   });
 
-  it("updates activeForm field", () => {
+  it("updates progress_label field", () => {
     store.create("Test", "Desc", "done");
-    const { changedFields } = store.update("1", { activeForm: "Running tests" });
-    expect(changedFields).toContain("activeForm");
-    expect(store.get("1")!.activeForm).toBe("Running tests");
+    const { changedFields } = store.update("1", { progress_label: "Running tests" });
+    expect(changedFields).toContain("progress_label");
+    expect(store.get("1")!.progress_label).toBe("Running tests");
   });
 
   it("updates description field", () => {
@@ -295,9 +295,8 @@ describe("TaskStore (in-memory)", () => {
   it("clearCompleted cleans up dependency edges", () => {
     store.create("Blocker", "Desc", "done");
     store.create("Blocked", "Desc", "done");
-    store.update("1", { addBlocks: ["2"] });
-    createAndApprove(store, "dummy"); // need task 1 to have pending_approval
-    // Actually set pending_approval on task 1
+    store.update("1", { add_blocks: ["2"] });
+    // Set pending_approval on task 1 so complete() works via /lgtm path
     store.update("1", { pending_approval: true });
     store.complete("1");
 
@@ -312,7 +311,7 @@ describe("TaskStore (in-memory)", () => {
     store.create("B1", "Desc", "done");
     store.create("B2", "Desc", "done");
 
-    store.update("1", { addBlocks: ["2", "3"] });
+    store.update("1", { add_blocks: ["2", "3"] });
 
     expect(store.get("1")!.blocks).toEqual(["2", "3"]);
     expect(store.get("2")!.blockedBy).toContain("1");
@@ -321,14 +320,14 @@ describe("TaskStore (in-memory)", () => {
 
   it("addBlockedBy warns on self-dependency", () => {
     store.create("Self", "Desc", "done");
-    const { warnings } = store.update("1", { addBlockedBy: ["1"] });
+    const { warnings } = store.update("1", { add_blocked_by: ["1"] });
     expect(store.get("1")!.blockedBy).toContain("1");
     expect(warnings).toContain("#1 blocks itself");
   });
 
   it("addBlockedBy warns on dangling ref", () => {
     store.create("Real", "Desc", "done");
-    const { warnings } = store.update("1", { addBlockedBy: ["9999"] });
+    const { warnings } = store.update("1", { add_blocked_by: ["9999"] });
     expect(store.get("1")!.blockedBy).toContain("9999");
     expect(warnings).toContain("#9999 does not exist");
   });
@@ -336,8 +335,8 @@ describe("TaskStore (in-memory)", () => {
   it("addBlockedBy warns on cycle", () => {
     store.create("A", "Desc", "done");
     store.create("B", "Desc", "done");
-    store.update("1", { addBlocks: ["2"] });
-    const { warnings } = store.update("1", { addBlockedBy: ["2"] });
+    store.update("1", { add_blocks: ["2"] });
+    const { warnings } = store.update("1", { add_blocked_by: ["2"] });
     expect(warnings).toContain("cycle: #1 and #2 block each other");
   });
 

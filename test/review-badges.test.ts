@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getDisplayStatus, getReviewBadges } from "../src/review-badges.js";
+import { getDisplayStatus, getGateStatus, getReviewBadges } from "../src/review-badges.js";
 import type { Task } from "../src/types.js";
 
 function makeTask(overrides: Partial<Task> = {}): Task {
@@ -57,6 +57,45 @@ describe("getReviewBadges", () => {
     });
 
     expect(getReviewBadges(task)).toBe("[🛠··]");
+  });
+});
+
+describe("getGateStatus", () => {
+  it("reports ready when human sign-off is open", () => {
+    expect(getGateStatus(makeTask({
+      pending_approval: true,
+      metadata: { lgtm_evidence: "ok" },
+    }))).toBe("ready for human sign-off via /lgtm 1");
+  });
+
+  it("reports reviewer failure separately from rejected evidence", () => {
+    expect(getGateStatus(makeTask({
+      metadata: {
+        lgtm_evidence: "ok",
+        robot_review_last_error: "Unexpected token 'a'",
+      },
+    }))).toContain("automatic robot review failed");
+  });
+
+  it("reports rejected robot review when latest review does not accept", () => {
+    expect(getGateStatus(makeTask({
+      metadata: {
+        lgtm_evidence: "ok",
+        robot_reviews: [{
+          iteration: 1,
+          reviewer: "opencode",
+          scope: "task evidence",
+          observations: ["Observed missing output"],
+          blind_spots: "none",
+          accepted: false,
+          evidence_complete: false,
+          evidence_convincing: false,
+          missing_evidence: ["literal output"],
+          submitted_at: "2026-04-17T00:00:00.000Z",
+          mode: "manual",
+        }],
+      },
+    }))).toBe("blocked: latest robot review rejected the evidence");
   });
 });
 

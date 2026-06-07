@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ROBOT_REVIEW_TIMEOUT_MS,
   extractFinalAssistantTextFromPiJsonl,
+  extractRobotReviewJson,
   getPiInvocation,
   getRobotReviewTimeoutMs,
   runRobotReviewCommand,
@@ -25,6 +26,22 @@ describe("robot review runner helpers", () => {
       "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ROBOT_REVIEW_JSON_START {\\\"accepted\\\":true} ROBOT_REVIEW_JSON_END\"}]}}",
     ].join("\n");
     expect(extractFinalAssistantTextFromPiJsonl(output)).toContain("ROBOT_REVIEW_JSON_START");
+  });
+
+  it("parses noisy JSON wrapped in review markers", () => {
+    const output = [
+      "ROBOT_REVIEW_JSON_START",
+      "and here is the JSON you asked for:",
+      "```json",
+      '{"accepted":true,"observations":["ok"]}',
+      "```",
+      "ROBOT_REVIEW_JSON_END",
+    ].join("\n");
+    expect(extractRobotReviewJson(output)).toEqual({ accepted: true, observations: ["ok"] });
+  });
+
+  it("includes raw output context on parse failure", () => {
+    expect(() => extractRobotReviewJson("ROBOT_REVIEW_JSON_START and nope ROBOT_REVIEW_JSON_END")).toThrow(/Raw output:/);
   });
 
   it("uses configured timeout or falls back to default", () => {

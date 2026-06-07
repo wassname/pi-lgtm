@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendRobotReviewMetadata, getLatestRobotReview, getRobotReviews } from "../src/robot-review.js";
+import { appendRobotReviewMetadata, getLatestRobotReview, getRobotReviews, shouldOpenHumanSignoffGate } from "../src/robot-review.js";
 import type { Task } from "../src/types.js";
 
 function makeTask(overrides: Partial<Task> = {}): Task {
@@ -21,6 +21,12 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 }
 
 describe("robot review helpers", () => {
+  it("reopens the human gate when accepted review exists for stored evidence", () => {
+    expect(shouldOpenHumanSignoffGate(makeTask({ metadata: { lgtm_evidence: "literal output" } }), true)).toBe(true);
+    expect(shouldOpenHumanSignoffGate(makeTask({ metadata: { lgtm_evidence: "literal output" } }), false)).toBe(false);
+    expect(shouldOpenHumanSignoffGate(makeTask(), true)).toBe(false);
+  });
+
   it("reads legacy single-review metadata", () => {
     const task = makeTask({
       metadata: {

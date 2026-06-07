@@ -11,7 +11,7 @@ Tasks can also carry a separate fresh-perspective robot review from a subagent o
 ## Install
 
 ```bash
-pi install npm:@wassname/pi-lgtm
+pi install npm:@wassname2/pi-lgtm
 ```
 
 Or for development:
@@ -65,7 +65,7 @@ Lists all tasks. `👀` indicates pending sign-off.
 
 ### `TaskGet`
 
-Full task details including `done_criterion` and approval state.
+Full task details including `done_criterion`, approval state, and a one-line gate status such as `ready for human sign-off via /lgtm 5` or `blocked: automatic robot review failed: ...`.
 
 ### `TaskUpdate`
 
@@ -109,7 +109,7 @@ Required fields:
 | `evidence_convincing` | Whether the supplied evidence would convince a skeptical reviewer |
 | `missing_evidence` | Concrete missing checks or artifacts needed before human sign-off |
 
-Use this from a separate subagent or other model when possible. Reviews append as iterations; the latest one is what gates human sign-off.
+Use this from a separate subagent or other model when possible. Reviews append as iterations; the latest one is what gates human sign-off. If stored LGTM evidence already exists, an accepted manual review reopens the human sign-off gate.
 
 ### `robot_review_run`
 
@@ -133,7 +133,7 @@ This appends a new robot-review iteration. The reviewer returns an explicit `acc
 
 ### `/lgtm <id>`
 
-Human-only sign-off. Shows stored evidence, failure modes, and remaining uncertainty for review, then asks for confirmation. Without `<id>`, shows a list of pending-approval tasks.
+Human-only sign-off. Shows stored evidence, falsification output, failure modes, review status, and remaining uncertainty in structured sections for review, then asks for confirmation. Without `<id>`, shows a list of pending-approval tasks.
 
 ### `/tasks`
 

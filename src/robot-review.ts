@@ -101,6 +101,10 @@ export function getLatestRobotReview(task: Task): RobotReviewRecord | undefined 
   return reviews.length > 0 ? reviews[reviews.length - 1] : undefined;
 }
 
+export function shouldOpenHumanSignoffGate(task: Task, reviewAccepted: boolean): boolean {
+  return reviewAccepted && typeof task.metadata?.lgtm_evidence === "string" && task.metadata.lgtm_evidence.length > 0;
+}
+
 export function appendRobotReviewMetadata(task: Task, review: Omit<RobotReviewRecord, "iteration">): Record<string, unknown> {
   const robot_reviews = [...getRobotReviews(task), { ...review, iteration: 0 }].map((entry, index) => ({
     ...entry,

@@ -27,16 +27,18 @@ import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { AutoClearManager } from "./auto-clear.js";
-import { type DisplayStatus, getDisplayStatus, getReviewBadges, getStateTag } from "./review-badges.js";
+import { type DisplayStatus, getDisplayStatus, getGateStatus, getReviewBadges, getStateTag } from "./review-badges.js";
 import {
   appendRobotReviewMetadata,
   getLatestRobotReview,
   getRobotReviews,
   latestRobotReviewPasses,
   type RobotReviewRecord,
+  shouldOpenHumanSignoffGate,
 } from "./robot-review.js";
 import { TaskStore } from "./task-store.js";
 import { loadTasksConfig } from "./tasks-config.js";
+import type { Task } from "./types.js";
 import { TaskWidget, type UICtx } from "./ui/task-widget.js";
 
 function textResult(msg: string) {
@@ -170,10 +172,130 @@ export async function runRobotReviewCommand(
   });
 }
 
-function extractRobotReviewJson(output: string): Record<string, unknown> {
+function summarizeRawOutput(output: string, maxChars = 400): string {
+  const singleLine = output.replace(/\s+/g, " ").trim();
+  if (singleLine.length <= maxChars) return singleLine;
+  return `${singleLine.slice(0, maxChars)}...`;
+}
+
+function stripMarkdownCodeFence(text: string): string {
+  const trimmed = text.trim();
+  const fence = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return fence ? fence[1].trim() : trimmed;
+}
+
+function extractBalancedJsonObject(text: string): string | undefined {
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === "{") {
+      if (depth === 0) start = index;
+      depth++;
+      continue;
+    }
+    if (char === "}") {
+      if (depth === 0) continue;
+      depth--;
+      if (depth === 0 && start >= 0) return text.slice(start, index + 1);
+    }
+  }
+  return undefined;
+}
+
+function getAutomaticReviewFailureMetadata(message: string, rawOutput?: string): Record<string, unknown> {
+  return {
+    robot_review_last_error: message,
+    robot_review_last_error_output: rawOutput ?? null,
+    robot_review_last_error_at: new Date().toISOString(),
+  };
+}
+
+function clearAutomaticReviewFailureMetadata(): Record<string, unknown> {
+  return {
+    robot_review_last_error: null,
+    robot_review_last_error_output: null,
+    robot_review_last_error_at: null,
+  };
+}
+
+function formatReviewTextBlock(title: string, body: string): string {
+  return `### ${title}\n\n\`\`\`text\n${body}\n\`\`\``;
+}
+
+function formatEvidencePackage(task: Task): string[] {
+  const metadata = task.metadata ?? {};
+  const sections: string[] = [];
+  if (typeof metadata.lgtm_evidence === "string") {
+    sections.push(formatReviewTextBlock("Evidence", metadata.lgtm_evidence));
+    if (typeof metadata.lgtm_failure_likely === "string") sections.push(`### Failure (likely)\n${metadata.lgtm_failure_likely}`);
+    if (typeof metadata.lgtm_failure_sneaky === "string") sections.push(`### Failure (sneaky)\n${metadata.lgtm_failure_sneaky}`);
+    if (typeof metadata.lgtm_falsification_test === "string") {
+      sections.push(formatReviewTextBlock("Falsification test", metadata.lgtm_falsification_test));
+    }
+    if (Array.isArray(metadata.lgtm_verification_hints) && metadata.lgtm_verification_hints.length > 0) {
+      sections.push(`### Verification hints\n${metadata.lgtm_verification_hints.map((hint: string) => `- ${hint}`).join("\n")}`);
+    }
+    if (typeof metadata.lgtm_remaining_uncertainty === "string") {
+      sections.push(`### Remaining uncertainty\n${metadata.lgtm_remaining_uncertainty}`);
+    }
+    if (typeof metadata.lgtm_submitted_at === "string") sections.push(`Submitted: ${metadata.lgtm_submitted_at}`);
+  }
+  if (typeof metadata.robot_review_last_error === "string") {
+    sections.push(`### Automatic robot review failure\n${metadata.robot_review_last_error}`);
+    if (typeof metadata.robot_review_last_error_output === "string" && metadata.robot_review_last_error_output.trim()) {
+      sections.push(formatReviewTextBlock("Reviewer raw output", metadata.robot_review_last_error_output));
+    }
+  }
+  return sections;
+}
+
+function getNonReviewMetadata(task: Task): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(task.metadata ?? {}).filter(([key]) => !key.startsWith("lgtm_") && !key.startsWith("robot_review_")),
+  );
+}
+
+export function extractRobotReviewJson(output: string): Record<string, unknown> {
   const match = output.match(/ROBOT_REVIEW_JSON_START\s*([\s\S]*?)\s*ROBOT_REVIEW_JSON_END/);
-  if (!match) throw new Error("Robot reviewer did not return the expected JSON markers.");
-  return JSON.parse(match[1]) as Record<string, unknown>;
+  const source = match ? match[1] : output;
+  const candidates = [
+    source.trim(),
+    stripMarkdownCodeFence(source),
+    extractBalancedJsonObject(source) ?? "",
+    extractBalancedJsonObject(stripMarkdownCodeFence(source)) ?? "",
+  ].filter(Boolean);
+
+  let lastError: unknown;
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      return JSON.parse(candidate) as Record<string, unknown>;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const prefix = match
+    ? "Robot reviewer returned invalid JSON"
+    : "Robot reviewer did not return the expected JSON markers or a parseable JSON object";
+  const detail = lastError instanceof Error ? `: ${lastError.message}` : "";
+  throw new Error(`${prefix}${detail}. Raw output: ${summarizeRawOutput(output)}`);
 }
 
 function formatRobotReview(review: RobotReviewRecord): string {
@@ -265,11 +387,24 @@ async function runAutomaticRobotReview(
   const commandLabel = `${invocation.command} ${invocation.args.slice(0, reviewerModel ? 6 : 4).join(" ")}`;
   const result = await runRobotReviewCommand(invocation, signal, timeoutMs);
   if (result.exitCode !== 0) {
-    throw new Error(`Robot reviewer failed (${result.exitCode ?? "?"}): ${(result.stderr || result.stdout).trim()}`);
+    const error = new Error(`Robot reviewer failed (${result.exitCode ?? "?"}): ${(result.stderr || result.stdout).trim()}`) as Error & { rawOutput?: string };
+    error.rawOutput = (result.stderr || result.stdout).trim();
+    throw error;
   }
-  const parsed = extractRobotReviewJson(result.stdout);
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = extractRobotReviewJson(result.stdout);
+  } catch (error) {
+    const wrapped = new Error(error instanceof Error ? error.message : String(error)) as Error & { rawOutput?: string };
+    wrapped.rawOutput = result.stdout.trim();
+    throw wrapped;
+  }
   const observations = Array.isArray(parsed.observations) ? parsed.observations.filter((item): item is string => typeof item === "string") : [];
-  if (observations.length === 0) throw new Error("Robot reviewer returned no observations.");
+  if (observations.length === 0) {
+    const error = new Error("Robot reviewer returned no observations.") as Error & { rawOutput?: string };
+    error.rawOutput = result.stdout.trim();
+    throw error;
+  }
   const rawMissing: string[] = Array.isArray(parsed.missing_evidence)
     ? parsed.missing_evidence.filter((item): item is string => typeof item === "string")
     : [];
@@ -548,13 +683,16 @@ export default function (pi: ExtensionAPI) {
       const lines: string[] = [
         `Task #${task.id}: ${task.subject}`,
         `Status: ${task.status} ${getReviewBadges(task)}${task.pending_approval && task.status !== "completed" ? " (pending human sign-off)" : ""}`,
+        `Gate status: ${getGateStatus(task)}`,
         `Done criterion: ${task.done_criterion}`,
+        `Description: ${desc}`,
       ];
-      lines.push(`Description: ${desc}`);
       if (robotReviews.length > 0) {
         const latest = robotReviews[robotReviews.length - 1];
-        lines.push(`Robot reviews: ${robotReviews.length} (latest: complete=${latest.evidence_complete ? "yes" : "no"}, convincing=${latest.evidence_convincing ? "yes" : "no"})`);
+        lines.push(`Robot reviews: ${robotReviews.length} (latest: accepted=${latest.accepted ? "yes" : "no"}, complete=${latest.evidence_complete ? "yes" : "no"}, convincing=${latest.evidence_convincing ? "yes" : "no"})`);
       }
+      const evidenceSections = formatEvidencePackage(task);
+      if (evidenceSections.length > 0) lines.push(...evidenceSections);
       if (task.blockedBy.length > 0) {
         const openBlockers = task.blockedBy.filter(bid => {
           const blocker = store.get(bid);
@@ -563,10 +701,10 @@ export default function (pi: ExtensionAPI) {
         if (openBlockers.length > 0) lines.push(`Blocked by: ${openBlockers.map(id => "#" + id).join(", ")}`);
       }
       if (task.blocks.length > 0) lines.push(`Blocks: ${task.blocks.map(id => "#" + id).join(", ")}`);
-      const metaKeys = Object.keys(task.metadata);
-      if (metaKeys.length > 0) lines.push(`Metadata: ${JSON.stringify(task.metadata)}`);
+      const metadata = getNonReviewMetadata(task);
+      if (Object.keys(metadata).length > 0) lines.push(`Metadata: ${JSON.stringify(metadata)}`);
 
-      return Promise.resolve(textResult(lines.join("\n")));
+      return Promise.resolve(textResult(lines.join("\n\n")));
     },
   });
 
@@ -684,6 +822,7 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
           lgtm_verification_hints: params.verification_hints,
           lgtm_remaining_uncertainty: params.remaining_uncertainty,
           lgtm_submitted_at: new Date().toISOString(),
+          ...clearAutomaticReviewFailureMetadata(),
         },
       });
       let robotReviewNote = "";
@@ -692,8 +831,11 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
       try {
         const { review, command } = await runAutomaticRobotReview(refreshedTask, signal, currentProvider);
         store.update(params.taskId, {
-          pending_approval: review.accepted,
-          metadata: appendRobotReviewMetadata(refreshedTask, review),
+          pending_approval: shouldOpenHumanSignoffGate(refreshedTask, review.accepted),
+          metadata: {
+            ...appendRobotReviewMetadata(refreshedTask, review),
+            ...clearAutomaticReviewFailureMetadata(),
+          },
         });
         robotReviewNote =
           `\n\n### Automatic robot review\n` +
@@ -712,33 +854,28 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
           robotReviewNote += `\nResult: human sign-off has been held back until the evidence is strengthened and reviewed again.`;
         }
       } catch (err: any) {
-        store.update(params.taskId, { pending_approval: false });
+        store.update(params.taskId, {
+          pending_approval: false,
+          metadata: getAutomaticReviewFailureMetadata(err.message, err.rawOutput),
+        });
         robotReviewNote =
           `\n\n### Automatic robot review\n` +
           `Reviewer failed: ${err.message}\n` +
-          `Human sign-off is blocked until the reviewer stage succeeds.`;
+          `Human sign-off is blocked until the reviewer stage succeeds.` +
+          (typeof err.rawOutput === "string" && err.rawOutput.trim()
+            ? `\n\n${formatReviewTextBlock("Reviewer raw output", err.rawOutput.trim())}`
+            : "");
       }
       widget.update();
 
-      const hintsSection = params.verification_hints?.length
-        ? `\n### Verification hints\n${params.verification_hints.map(h => `- ${h}`).join("\n")}`
-        : "";
-      const uncertaintySection = params.remaining_uncertainty
-        ? `\n### Remaining uncertainty\n${params.remaining_uncertainty}`
-        : "";
-
+      const updatedTask = store.get(task.id) ?? task;
       const result =
         `## Task #${task.id}: ${task.subject}\n` +
         `Done criterion: ${task.done_criterion}\n\n` +
-        `### Evidence\n${params.evidence}\n\n` +
-        `### Failure (likely)\n${params.failure_likely}\n\n` +
-        `### Failure (sneaky)\n${params.failure_sneaky}\n\n` +
-        `### Falsification test\n${params.falsification_test}` +
-        hintsSection +
-        uncertaintySection +
+        `${formatEvidencePackage(updatedTask).join("\n\n")}` +
         robotReviewNote +
         `\n\n---\n` +
-        `Task #${task.id} is now ${store.get(task.id)?.pending_approval ? `pending human sign-off via \`/lgtm ${task.id}\`` : "not yet ready for human sign-off"}.\n\n` +
+        `Gate status: ${getGateStatus(updatedTask)}\n\n` +
         `**Self-check (non-blocking):** Look at this as the human will see it. ` +
         `Does the evidence directly address the done_criterion "${task.done_criterion}"? ` +
         `Would a skeptical reviewer find this convincing, or would they immediately ask ` +
@@ -778,21 +915,23 @@ This does not complete the task. Human /lgtm remains the only completion path.`,
       if (!task) return Promise.resolve(textResult(`Task #${params.taskId} not found`));
       if (task.status === "completed") return Promise.resolve(textResult(`Task #${params.taskId} already completed`));
 
+      const accepted = params.accepted ?? (params.evidence_complete && params.evidence_convincing);
       store.update(params.taskId, {
-        pending_approval: params.evidence_complete && params.evidence_convincing ? task.pending_approval : false,
+        pending_approval: shouldOpenHumanSignoffGate(task, accepted),
         metadata: {
           ...appendRobotReviewMetadata(task, {
             reviewer: params.reviewer,
             scope: params.scope,
             observations: params.observations,
             blind_spots: params.blind_spots,
-            accepted: params.accepted ?? (params.evidence_complete && params.evidence_convincing),
+            accepted,
             evidence_complete: params.evidence_complete,
             evidence_convincing: params.evidence_convincing,
             missing_evidence: params.missing_evidence ?? [],
             submitted_at: new Date().toISOString(),
             mode: "manual",
           }),
+          ...clearAutomaticReviewFailureMetadata(),
         },
       });
       widget.update();
@@ -802,12 +941,13 @@ This does not complete the task. Human /lgtm remains the only completion path.`,
         `Iteration: ${getRobotReviews(store.get(params.taskId)!).length}\n` +
         `Reviewer: ${params.reviewer}\n` +
         `Scope: ${params.scope}\n\n` +
-        `Accepted: ${(params.accepted ?? (params.evidence_complete && params.evidence_convincing)) ? "yes" : "no"}\n` +
+        `Accepted: ${accepted ? "yes" : "no"}\n` +
         `Evidence complete: ${params.evidence_complete ? "yes" : "no"}\n` +
         `Evidence convincing: ${params.evidence_convincing ? "yes" : "no"}\n\n` +
         `### Observations\n${params.observations.map(o => `- ${o}`).join("\n")}\n\n` +
         `${(params.missing_evidence?.length ?? 0) > 0 ? `### Missing evidence\n${(params.missing_evidence ?? []).map(item => `- ${item}`).join("\n")}\n\n` : ""}` +
         `### Blind spots\n${params.blind_spots}\n\n` +
+        `Gate status: ${getGateStatus(store.get(params.taskId) ?? task)}\n\n` +
         `🤖 Robot review stored. Human sign-off still requires \`/lgtm ${task.id}\`.`;
 
       return Promise.resolve(textResult(result));
@@ -833,14 +973,18 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
         return textResult(`Task #${params.taskId} has no stored evidence yet. Call lgtm_ask first.`);
       }
 
-      const { review, command } = await runAutomaticRobotReview(task, signal, currentProvider);
-      store.update(params.taskId, {
-        pending_approval: review.accepted ? task.pending_approval : false,
-        metadata: appendRobotReviewMetadata(task, review),
-      });
-      widget.update();
+      try {
+        const { review, command } = await runAutomaticRobotReview(task, signal, currentProvider);
+        store.update(params.taskId, {
+          pending_approval: shouldOpenHumanSignoffGate(task, review.accepted),
+          metadata: {
+            ...appendRobotReviewMetadata(task, review),
+            ...clearAutomaticReviewFailureMetadata(),
+          },
+        });
+        widget.update();
 
-      return textResult(
+        return textResult(
         `## Automatic robot review for task #${task.id}: ${task.subject}\n` +
         `Reviewer command: ${command}\n` +
         `Iteration: ${getRobotReviews(store.get(params.taskId)!).length}\n` +
@@ -852,8 +996,24 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
           : "") +
         `### Observations\n${review.observations.map(o => `- ${o}`).join("\n")}\n\n` +
         `${review.missing_evidence.length > 0 ? `### Missing evidence\n${review.missing_evidence.map(item => `- ${item}`).join("\n")}\n\n` : ""}` +
-        `### Blind spots\n${review.blind_spots}`,
-      );
+        `### Blind spots\n${review.blind_spots}\n\n` +
+        `Gate status: ${getGateStatus(store.get(params.taskId) ?? task)}`,
+        );
+      } catch (err: any) {
+        store.update(params.taskId, {
+          pending_approval: false,
+          metadata: getAutomaticReviewFailureMetadata(err.message, err.rawOutput),
+        });
+        widget.update();
+        return textResult(
+          `## Automatic robot review for task #${task.id}: ${task.subject}\n` +
+          `Reviewer failed: ${err.message}\n\n` +
+          `Gate status: ${getGateStatus(store.get(params.taskId) ?? task)}` +
+          (typeof err.rawOutput === "string" && err.rawOutput.trim()
+            ? `\n\n${formatReviewTextBlock("Reviewer raw output", err.rawOutput.trim())}`
+            : ""),
+        );
+      }
     },
   });
 
@@ -999,17 +1159,12 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
     const robotReviews = getRobotReviews(task);
     const noEvidence = !task.pending_approval && !m.lgtm_evidence;
     const robotRejected = robotReviews.length > 0 && !latestRobotReviewPasses(task);
+    const reviewerFailed = typeof m.robot_review_last_error === "string";
 
     // Print evidence to the conversation so the user can review it there
-    const evidenceParts: string[] = [];
+    const evidenceParts: string[] = [`Gate status: ${getGateStatus(task)}`];
     if (m.lgtm_evidence) {
-      evidenceParts.push(`**Evidence:**\n${m.lgtm_evidence}`);
-      evidenceParts.push(`Failure (likely): ${m.lgtm_failure_likely}`);
-      evidenceParts.push(`Failure (sneaky): ${m.lgtm_failure_sneaky}`);
-      if (m.lgtm_falsification_test) evidenceParts.push(`Falsification test: ${m.lgtm_falsification_test}`);
-      if (m.lgtm_remaining_uncertainty) evidenceParts.push(`Remaining uncertainty: ${m.lgtm_remaining_uncertainty}`);
-      if (m.lgtm_verification_hints?.length) evidenceParts.push(`Hints: ${m.lgtm_verification_hints.join(", ")}`);
-      evidenceParts.push(`Submitted: ${m.lgtm_submitted_at}`);
+      evidenceParts.push(...formatEvidencePackage(task));
     } else {
       evidenceParts.push(`(No agent-submitted evidence — agent never called lgtm_ask. Human override.)`);
     }
@@ -1030,6 +1185,9 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
     if (noEvidence) {
       title = `⚠ Task #${taskId} has no agent-submitted evidence.\nSign off anyway?\nDone: ${task.done_criterion}`;
       signLabel = "✓ Override — sign off without evidence";
+    } else if (reviewerFailed) {
+      title = `⚠ Task #${taskId} automatic robot review failed.\nSign off anyway?\nDone: ${task.done_criterion}`;
+      signLabel = "✓ Override — sign off despite reviewer failure";
     } else if (robotRejected) {
       title = `⚠ Task #${taskId} robot review rejected the evidence.\nSign off anyway?\nDone: ${task.done_criterion}`;
       signLabel = "✓ Override — sign off despite rejected review";
