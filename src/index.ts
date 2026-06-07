@@ -23,11 +23,23 @@
  */
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { AutoClearManager } from "./auto-clear.js";
-import { type DisplayStatus, getDisplayStatus, getGateStatus, getReviewBadges, getStateTag } from "./review-badges.js";
+import {
+  type CompletionMode,
+  type DisplayStatus,
+  getCompletionMode,
+  getDisplayStatus,
+  getGateStatus,
+  getReviewBadges,
+  getReviewState,
+  getStateTag,
+  type ReviewState,
+} from "./review-badges.js";
 import {
   appendRobotReviewMetadata,
   getLatestRobotReview,
@@ -45,7 +57,7 @@ function textResult(msg: string) {
   return { content: [{ type: "text" as const, text: msg }], details: undefined as any };
 }
 
-const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "lgtm_ask", "robot_review_ask", "robot_review_run"]);
+const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "lgtm_ask", "lgtm_supersede", "robot_review_ask", "robot_review_run"]);
 const REMINDER_INTERVAL = 4;
 const AUTO_CLEAR_DELAY = 4;
 export const DEFAULT_ROBOT_REVIEW_TIMEOUT_MS = 120_000;
@@ -219,6 +231,37 @@ function extractBalancedJsonObject(text: string): string | undefined {
   return undefined;
 }
 
+interface EvidenceCommandRecord {
+  cmd: string;
+  exit_code: number;
+  stdout_path?: string;
+  stderr_path?: string;
+}
+
+interface EvidenceArtifactRecord {
+  path: string;
+  sha256: string;
+  bytes: number;
+}
+
+interface EvidenceIterationRecord {
+  iteration: number;
+  submitted_at: string;
+  superseded_at?: string;
+  supersede_reason?: string;
+  evidence: string;
+  failure_likely: string;
+  failure_sneaky: string;
+  falsification_test: string;
+  verification_hints: string[];
+  remaining_uncertainty: string;
+  commands: EvidenceCommandRecord[];
+  evidence_artifacts: EvidenceArtifactRecord[];
+  falsification_artifacts: EvidenceArtifactRecord[];
+  robot_reviews: RobotReviewRecord[];
+  automatic_review_failure?: { message: string; raw_output?: string };
+}
+
 function getAutomaticReviewFailureMetadata(message: string, rawOutput?: string): Record<string, unknown> {
   return {
     robot_review_last_error: message,
@@ -235,32 +278,173 @@ function clearAutomaticReviewFailureMetadata(): Record<string, unknown> {
   };
 }
 
+function clearRobotReviewMetadata(): Record<string, unknown> {
+  return {
+    robot_reviews: null,
+    robot_review_reviewer: null,
+    robot_review_scope: null,
+    robot_review_observations: null,
+    robot_review_blind_spots: null,
+    robot_review_accepted: null,
+    robot_review_evidence_complete: null,
+    robot_review_evidence_convincing: null,
+    robot_review_missing_evidence: null,
+    robot_review_submitted_at: null,
+    robot_review_mode: null,
+    robot_review_raw_output: null,
+    robot_review_requires_followup: null,
+    robot_review_iteration_count: null,
+  };
+}
+
+function clearCurrentEvidenceMetadata(): Record<string, unknown> {
+  return {
+    lgtm_evidence: null,
+    lgtm_failure_likely: null,
+    lgtm_failure_sneaky: null,
+    lgtm_falsification_test: null,
+    lgtm_verification_hints: null,
+    lgtm_remaining_uncertainty: null,
+    lgtm_submitted_at: null,
+    lgtm_commands: null,
+    lgtm_evidence_artifacts: null,
+    lgtm_falsification_artifacts: null,
+  };
+}
+
+function normalizeCommandRecords(value: unknown): EvidenceCommandRecord[] {
+  return Array.isArray(value)
+    ? value.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const command = entry as Record<string, unknown>;
+      if (typeof command.cmd !== "string" || typeof command.exit_code !== "number") return [];
+      return [{
+        cmd: command.cmd,
+        exit_code: command.exit_code,
+        stdout_path: typeof command.stdout_path === "string" ? command.stdout_path : undefined,
+        stderr_path: typeof command.stderr_path === "string" ? command.stderr_path : undefined,
+      }];
+    })
+    : [];
+}
+
+function normalizeArtifactRecords(value: unknown): EvidenceArtifactRecord[] {
+  return Array.isArray(value)
+    ? value.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const artifact = entry as Record<string, unknown>;
+      if (typeof artifact.path !== "string" || typeof artifact.sha256 !== "string" || typeof artifact.bytes !== "number") return [];
+      return [{ path: artifact.path, sha256: artifact.sha256, bytes: artifact.bytes }];
+    })
+    : [];
+}
+
+export function buildArtifactRecords(paths?: string[]): EvidenceArtifactRecord[] {
+  return (paths ?? []).map((path) => {
+    const resolvedPath = resolve(path);
+    const bytes = statSync(resolvedPath).size;
+    const sha256 = createHash("sha256").update(readFileSync(resolvedPath)).digest("hex");
+    return { path: resolvedPath, sha256, bytes };
+  });
+}
+
+export function getEvidenceHistory(task: Task): EvidenceIterationRecord[] {
+  return Array.isArray(task.metadata?.lgtm_history)
+    ? task.metadata.lgtm_history.filter((entry: unknown): entry is EvidenceIterationRecord => !!entry && typeof entry === "object")
+    : [];
+}
+
+export function getCurrentEvidenceIteration(task: Task): EvidenceIterationRecord | undefined {
+  const metadata = task.metadata ?? {};
+  if (typeof metadata.lgtm_evidence !== "string") return undefined;
+  return {
+    iteration: getEvidenceHistory(task).length + 1,
+    submitted_at: typeof metadata.lgtm_submitted_at === "string" ? metadata.lgtm_submitted_at : new Date(0).toISOString(),
+    evidence: metadata.lgtm_evidence,
+    failure_likely: typeof metadata.lgtm_failure_likely === "string" ? metadata.lgtm_failure_likely : "",
+    failure_sneaky: typeof metadata.lgtm_failure_sneaky === "string" ? metadata.lgtm_failure_sneaky : "",
+    falsification_test: typeof metadata.lgtm_falsification_test === "string" ? metadata.lgtm_falsification_test : "",
+    verification_hints: Array.isArray(metadata.lgtm_verification_hints) ? metadata.lgtm_verification_hints.filter((hint: unknown): hint is string => typeof hint === "string") : [],
+    remaining_uncertainty: typeof metadata.lgtm_remaining_uncertainty === "string" ? metadata.lgtm_remaining_uncertainty : "",
+    commands: normalizeCommandRecords(metadata.lgtm_commands),
+    evidence_artifacts: normalizeArtifactRecords(metadata.lgtm_evidence_artifacts),
+    falsification_artifacts: normalizeArtifactRecords(metadata.lgtm_falsification_artifacts),
+    robot_reviews: getRobotReviews(task),
+    automatic_review_failure: typeof metadata.robot_review_last_error === "string"
+      ? {
+        message: metadata.robot_review_last_error,
+        raw_output: typeof metadata.robot_review_last_error_output === "string" ? metadata.robot_review_last_error_output : undefined,
+      }
+      : undefined,
+  };
+}
+
+export function getEvidenceIterationCount(task: Task): number {
+  return getEvidenceHistory(task).length + (getCurrentEvidenceIteration(task) ? 1 : 0);
+}
+
+export function archiveCurrentEvidence(task: Task, reason: string): Record<string, unknown> {
+  const current = getCurrentEvidenceIteration(task);
+  if (!current) return {};
+  return {
+    lgtm_history: [
+      ...getEvidenceHistory(task),
+      {
+        ...current,
+        superseded_at: new Date().toISOString(),
+        supersede_reason: reason,
+      },
+    ],
+  };
+}
+
 function formatReviewTextBlock(title: string, body: string): string {
   return `### ${title}\n\n\`\`\`text\n${body}\n\`\`\``;
 }
 
+function formatCommandRecords(commands: EvidenceCommandRecord[]): string | undefined {
+  if (commands.length === 0) return undefined;
+  return `### Commands\n${commands.map((command, index) => {
+    const parts = [
+      `${index + 1}. \`${command.cmd}\``,
+      `exit=${command.exit_code}`,
+    ];
+    if (command.stdout_path) parts.push(`stdout=${command.stdout_path}`);
+    if (command.stderr_path) parts.push(`stderr=${command.stderr_path}`);
+    return `- ${parts.join(" | ")}`;
+  }).join("\n")}`;
+}
+
+function formatArtifactRecords(title: string, artifacts: EvidenceArtifactRecord[]): string | undefined {
+  if (artifacts.length === 0) return undefined;
+  return `### ${title}\n${artifacts.map((artifact) => `- ${artifact.path} | sha256=${artifact.sha256} | bytes=${artifact.bytes}`).join("\n")}`;
+}
+
 function formatEvidencePackage(task: Task): string[] {
-  const metadata = task.metadata ?? {};
+  const current = getCurrentEvidenceIteration(task);
   const sections: string[] = [];
-  if (typeof metadata.lgtm_evidence === "string") {
-    sections.push(formatReviewTextBlock("Evidence", metadata.lgtm_evidence));
-    if (typeof metadata.lgtm_failure_likely === "string") sections.push(`### Failure (likely)\n${metadata.lgtm_failure_likely}`);
-    if (typeof metadata.lgtm_failure_sneaky === "string") sections.push(`### Failure (sneaky)\n${metadata.lgtm_failure_sneaky}`);
-    if (typeof metadata.lgtm_falsification_test === "string") {
-      sections.push(formatReviewTextBlock("Falsification test", metadata.lgtm_falsification_test));
+  if (current) {
+    sections.push(`Evidence iteration: ${current.iteration} of ${getEvidenceIterationCount(task)}`);
+    sections.push(formatReviewTextBlock("Evidence", current.evidence));
+    if (current.failure_likely) sections.push(`### Failure (likely)\n${current.failure_likely}`);
+    if (current.failure_sneaky) sections.push(`### Failure (sneaky)\n${current.failure_sneaky}`);
+    if (current.falsification_test) sections.push(formatReviewTextBlock("Falsification test", current.falsification_test));
+    const commands = formatCommandRecords(current.commands);
+    if (commands) sections.push(commands);
+    const evidenceArtifacts = formatArtifactRecords("Evidence artifacts", current.evidence_artifacts);
+    if (evidenceArtifacts) sections.push(evidenceArtifacts);
+    const falsificationArtifacts = formatArtifactRecords("Falsification artifacts", current.falsification_artifacts);
+    if (falsificationArtifacts) sections.push(falsificationArtifacts);
+    if (current.verification_hints.length > 0) {
+      sections.push(`### Verification hints\n${current.verification_hints.map((hint) => `- ${hint}`).join("\n")}`);
     }
-    if (Array.isArray(metadata.lgtm_verification_hints) && metadata.lgtm_verification_hints.length > 0) {
-      sections.push(`### Verification hints\n${metadata.lgtm_verification_hints.map((hint: string) => `- ${hint}`).join("\n")}`);
-    }
-    if (typeof metadata.lgtm_remaining_uncertainty === "string") {
-      sections.push(`### Remaining uncertainty\n${metadata.lgtm_remaining_uncertainty}`);
-    }
-    if (typeof metadata.lgtm_submitted_at === "string") sections.push(`Submitted: ${metadata.lgtm_submitted_at}`);
+    if (current.remaining_uncertainty) sections.push(`### Remaining uncertainty\n${current.remaining_uncertainty}`);
+    sections.push(`Submitted: ${current.submitted_at}`);
   }
-  if (typeof metadata.robot_review_last_error === "string") {
-    sections.push(`### Automatic robot review failure\n${metadata.robot_review_last_error}`);
-    if (typeof metadata.robot_review_last_error_output === "string" && metadata.robot_review_last_error_output.trim()) {
-      sections.push(formatReviewTextBlock("Reviewer raw output", metadata.robot_review_last_error_output));
+  if (typeof task.metadata?.robot_review_last_error === "string") {
+    sections.push(`### Automatic robot review failure\n${task.metadata.robot_review_last_error}`);
+    if (typeof task.metadata?.robot_review_last_error_output === "string" && task.metadata.robot_review_last_error_output.trim()) {
+      sections.push(formatReviewTextBlock("Reviewer raw output", task.metadata.robot_review_last_error_output));
     }
   }
   return sections;
@@ -268,8 +452,16 @@ function formatEvidencePackage(task: Task): string[] {
 
 function getNonReviewMetadata(task: Task): Record<string, unknown> {
   return Object.fromEntries(
-    Object.entries(task.metadata ?? {}).filter(([key]) => !key.startsWith("lgtm_") && !key.startsWith("robot_review_")),
+    Object.entries(task.metadata ?? {}).filter(([key]) =>
+      !key.startsWith("lgtm_") && !key.startsWith("robot_review_") && key !== "lgtm_history"
+    ),
   );
+}
+
+function formatHistorySummary(task: Task): string | undefined {
+  const history = getEvidenceHistory(task);
+  if (history.length === 0) return undefined;
+  return `Superseded evidence:\n${history.map((entry) => `- #${entry.iteration} superseded ${entry.superseded_at ?? "?"}: ${entry.supersede_reason ?? "(no reason recorded)"}`).join("\n")}`;
 }
 
 export function extractRobotReviewJson(output: string): Record<string, unknown> {
@@ -364,6 +556,9 @@ function buildRobotReviewPrompt(task: any): string {
     `Falsification test: ${task.metadata?.lgtm_falsification_test ?? "(missing)"}`,
     `Verification hints: ${Array.isArray(task.metadata?.lgtm_verification_hints) ? task.metadata.lgtm_verification_hints.join(" | ") : "(missing)"}`,
     `Remaining uncertainty: ${task.metadata?.lgtm_remaining_uncertainty ?? "(missing)"}`,
+    `Commands: ${JSON.stringify(normalizeCommandRecords(task.metadata?.lgtm_commands))}`,
+    `Evidence artifacts: ${JSON.stringify(normalizeArtifactRecords(task.metadata?.lgtm_evidence_artifacts))}`,
+    `Falsification artifacts: ${JSON.stringify(normalizeArtifactRecords(task.metadata?.lgtm_falsification_artifacts))}`,
     priorSection,
     "Output format:",
     "ROBOT_REVIEW_JSON_START",
@@ -680,19 +875,29 @@ export default function (pi: ExtensionAPI) {
 
       const desc = task.description.replace(/\\n/g, "\n");
       const robotReviews = getRobotReviews(task);
+      const completionMode: CompletionMode = getCompletionMode(task);
+      const reviewState: ReviewState = getReviewState(task);
+      const currentEvidence = getCurrentEvidenceIteration(task);
+      const history = getEvidenceHistory(task);
       const lines: string[] = [
         `Task #${task.id}: ${task.subject}`,
         `Status: ${task.status} ${getReviewBadges(task)}${task.pending_approval && task.status !== "completed" ? " (pending human sign-off)" : ""}`,
+        `Completion mode: ${completionMode}`,
+        `Review state: ${reviewState}`,
         `Gate status: ${getGateStatus(task)}`,
         `Done criterion: ${task.done_criterion}`,
         `Description: ${desc}`,
       ];
+      lines.push(`Evidence iterations: total=${getEvidenceIterationCount(task)}, current=${currentEvidence ? currentEvidence.iteration : 0}, superseded=${history.length}`);
+      lines.push(`Human sign-off pending: ${task.pending_approval ? "yes" : "no"}`);
       if (robotReviews.length > 0) {
         const latest = robotReviews[robotReviews.length - 1];
-        lines.push(`Robot reviews: ${robotReviews.length} (latest: accepted=${latest.accepted ? "yes" : "no"}, complete=${latest.evidence_complete ? "yes" : "no"}, convincing=${latest.evidence_convincing ? "yes" : "no"})`);
+        lines.push(`Robot reviews on current evidence: ${robotReviews.length} (latest: accepted=${latest.accepted ? "yes" : "no"}, complete=${latest.evidence_complete ? "yes" : "no"}, convincing=${latest.evidence_convincing ? "yes" : "no"})`);
       }
       const evidenceSections = formatEvidencePackage(task);
       if (evidenceSections.length > 0) lines.push(...evidenceSections);
+      const historySummary = formatHistorySummary(task);
+      if (historySummary) lines.push(historySummary);
       if (task.blockedBy.length > 0) {
         const openBlockers = task.blockedBy.filter(bid => {
           const blocker = store.get(bid);
@@ -794,7 +999,10 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
 - **failure_sneaky**: Most perverse or sneaky failure -- one that looks like success superficially, corrupts silently, or only breaks under specific conditions (scale, time, edge case). E.g. feature active but wrong mechanism, works in tests but degrades in prod, correct output for wrong reason.
 - **falsification_test**: What you ran and the literal output you got, with reasoning why that output disproves the failure mode
 - **verification_hints**: Where to look and what to check, with specific content quoted (not bare paths or counts)
-- **remaining_uncertainty**: What's NOT tested, known limitations, deferred edge cases`,
+- **remaining_uncertainty**: What's NOT tested, known limitations, deferred edge cases
+- **commands**: Optional first-class command records for the evidence package
+- **evidence_paths / falsification_paths**: Optional local artifact paths. The tool stores absolute path, sha256, and byte size for auditability.
+- **supersede_reason**: Optional reason when this submission replaces an older one on the same task`,
     parameters: Type.Object({
       taskId: Type.String({ description: "Task ID to submit for sign-off" }),
       evidence: Type.String({ description: "Verbatim auditable proof: literal command output, exact log lines, markdown block quotes, table rows, URLs. NOT summaries or interpretations. 'I ran X and got Y' is not evidence -- paste the actual output of X. A human must verify from this alone without re-running. (One short paragraph is fine; verbatim matters more than length.)" }),
@@ -803,6 +1011,15 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
       falsification_test: Type.String({ description: "What you ran and the literal output you got. Include verbatim command + output, not 'it worked'. State why that output could not occur if a failure mode were real. Brevity is fine; the verbatim output is what counts." }),
       verification_hints: Type.Array(Type.String(), { description: "Where to look, with specific content quoted (not bare paths or counts). E.g. 'src/loss.py:45-60 shows grad_norm=0.001'. One or two short hints is enough." }),
       remaining_uncertainty: Type.String({ description: "What's NOT tested, known limitations, deferred edges. One short sentence preferred. If you can't articulate uncertainty, you haven't thought hard enough." }),
+      commands: Type.Optional(Type.Array(Type.Object({
+        cmd: Type.String({ description: "Exact command that was run" }),
+        exit_code: Type.Number({ description: "Process exit code" }),
+        stdout_path: Type.Optional(Type.String({ description: "Optional path to captured stdout" })),
+        stderr_path: Type.Optional(Type.String({ description: "Optional path to captured stderr" })),
+      }))),
+      evidence_paths: Type.Optional(Type.Array(Type.String(), { description: "Optional local artifact paths backing the evidence. Stored as absolute path + sha256 + byte size." })),
+      falsification_paths: Type.Optional(Type.Array(Type.String(), { description: "Optional local artifact paths backing the falsification test. Stored as absolute path + sha256 + byte size." })),
+      supersede_reason: Type.Optional(Type.String({ description: "Why this evidence replaces an older submission on the same task." })),
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
@@ -815,6 +1032,9 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
       store.update(params.taskId, {
         pending_approval: true,
         metadata: {
+          ...archiveCurrentEvidence(task, params.supersede_reason ?? "replaced by newer lgtm submission"),
+          ...clearCurrentEvidenceMetadata(),
+          ...clearRobotReviewMetadata(),
           lgtm_evidence: params.evidence,
           lgtm_failure_likely: params.failure_likely,
           lgtm_failure_sneaky: params.failure_sneaky,
@@ -822,6 +1042,9 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
           lgtm_verification_hints: params.verification_hints,
           lgtm_remaining_uncertainty: params.remaining_uncertainty,
           lgtm_submitted_at: new Date().toISOString(),
+          lgtm_commands: params.commands ?? [],
+          lgtm_evidence_artifacts: buildArtifactRecords(params.evidence_paths),
+          lgtm_falsification_artifacts: buildArtifactRecords(params.falsification_paths),
           ...clearAutomaticReviewFailureMetadata(),
         },
       });
@@ -882,6 +1105,46 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
         `"but what about..."? If evidence feels thin, call lgtm_ask again with stronger evidence.`;
 
       return textResult(result);
+    },
+  });
+
+  pi.registerTool({
+    name: "lgtm_supersede",
+    label: "lgtm_supersede",
+    description: `Mark the current LGTM evidence package as superseded without completing the task.
+
+Use this when a prior claim is stale or wrong and reviewers should stop treating it as the current evidence. The current evidence, robot reviews, and reviewer-failure context are archived into history with your reason. Human /lgtm remains the only completion path.`,
+    parameters: Type.Object({
+      taskId: Type.String({ description: "Task ID whose current evidence should be superseded" }),
+      reason: Type.String({ description: "Why the current evidence is stale or replaced" }),
+    }),
+
+    execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const task = store.get(params.taskId);
+      if (!task) return Promise.resolve(textResult(`Task #${params.taskId} not found`));
+      if (!getCurrentEvidenceIteration(task)) {
+        return Promise.resolve(textResult(`Task #${params.taskId} has no current evidence to supersede.`));
+      }
+
+      store.update(params.taskId, {
+        pending_approval: false,
+        metadata: {
+          ...archiveCurrentEvidence(task, params.reason),
+          ...clearCurrentEvidenceMetadata(),
+          ...clearRobotReviewMetadata(),
+          ...clearAutomaticReviewFailureMetadata(),
+        },
+      });
+      widget.update();
+
+      const updatedTask = store.get(params.taskId) ?? task;
+      return Promise.resolve(textResult(
+        `## Evidence superseded for task #${task.id}: ${task.subject}\n` +
+        `Reason: ${params.reason}\n\n` +
+        `Review state: ${getReviewState(updatedTask)}\n` +
+        `Gate status: ${getGateStatus(updatedTask)}\n\n` +
+        `${formatHistorySummary(updatedTask) ?? "No evidence history found."}`,
+      ));
     },
   });
 
@@ -1166,8 +1429,10 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
     if (m.lgtm_evidence) {
       evidenceParts.push(...formatEvidencePackage(task));
     } else {
-      evidenceParts.push(`(No agent-submitted evidence — agent never called lgtm_ask. Human override.)`);
+      evidenceParts.push(`(No current agent-submitted evidence — agent never called lgtm_ask, or the prior evidence was superseded.)`);
     }
+    const historySummary = formatHistorySummary(task);
+    if (historySummary) evidenceParts.push(historySummary);
     if (robotReviews.length > 0) {
       evidenceParts.push(
         `Robot reviews (${robotReviews.length} total):\n${robotReviews.map(formatRobotReview).join("\n\n")}`,

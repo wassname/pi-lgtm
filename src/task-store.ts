@@ -133,8 +133,8 @@ export class TaskStore {
       // Once a task has stored lgtm evidence, completion must go through /lgtm so the
       // human gate + robot review can't be skipped.
       if (fields.status === "completed") {
-        if (task.pending_approval || task.metadata?.lgtm_evidence) {
-          throw new Error(`Use /lgtm ${id} to complete this task — it has lgtm evidence pending review.`);
+        if (task.pending_approval || task.metadata?.lgtm_evidence || (Array.isArray(task.metadata?.lgtm_history) && task.metadata.lgtm_history.length > 0)) {
+          throw new Error(`Use /lgtm ${id} to complete this task — completion_mode=lgtm because evidence was submitted.`);
         }
       }
 

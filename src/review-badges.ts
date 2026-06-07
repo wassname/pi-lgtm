@@ -3,6 +3,14 @@ import type { Task } from "./types.js";
 
 const STAGES = ["🛠", "🤖", "👀"] as const;
 
+function hasCurrentEvidence(task: Task): boolean {
+  return typeof task.metadata?.lgtm_evidence === "string" && task.metadata.lgtm_evidence.length > 0;
+}
+
+function hasEvidenceHistory(task: Task): boolean {
+  return Array.isArray(task.metadata?.lgtm_history) && task.metadata.lgtm_history.length > 0;
+}
+
 /** Pipeline stages: `[🛠·🤖·👀]` fills left-to-right as evidence→review→signoff progresses. */
 export function getReviewBadges(task: Task): string {
   const filled = [
@@ -30,18 +38,44 @@ export function getDisplayStatus(task: Task): DisplayStatus {
   return task.status;
 }
 
+export type CompletionMode = "direct" | "lgtm";
+export type ReviewState =
+  | "no_evidence"
+  | "evidence_submitted"
+  | "reviewer_failed_to_run"
+  | "reviewer_rejected"
+  | "ready_for_human"
+  | "superseded"
+  | "human_signed_off";
 export type StateTag = "READY" | "ACTIVE" | "PENDING" | "DONE";
 
+export function getCompletionMode(task: Task): CompletionMode {
+  return hasCurrentEvidence(task) || hasEvidenceHistory(task) || getRobotReviews(task).length > 0 || task.pending_approval
+    ? "lgtm"
+    : "direct";
+}
+
+export function getReviewState(task: Task): ReviewState {
+  if (task.status === "completed") return "human_signed_off";
+  if (task.pending_approval && hasCurrentEvidence(task)) return "ready_for_human";
+  if (typeof task.metadata?.robot_review_last_error === "string") return "reviewer_failed_to_run";
+  const latest = getLatestRobotReview(task);
+  if (latest && !latest.accepted) return "reviewer_rejected";
+  if (hasCurrentEvidence(task)) return "evidence_submitted";
+  if (hasEvidenceHistory(task)) return "superseded";
+  return "no_evidence";
+}
+
 export function getGateStatus(task: Task): string {
-  if (task.status === "completed") return "human signed off";
-  if (!task.metadata?.lgtm_evidence) return "no lgtm evidence submitted";
-  if (task.pending_approval) return `ready for human sign-off via /lgtm ${task.id}`;
-  if (typeof task.metadata?.robot_review_last_error === "string") {
+  const state = getReviewState(task);
+  if (state === "human_signed_off") return "human signed off";
+  if (state === "no_evidence") return "no lgtm evidence submitted";
+  if (state === "ready_for_human") return `ready for human sign-off via /lgtm ${task.id}`;
+  if (state === "reviewer_failed_to_run") {
     return `blocked: automatic robot review failed: ${task.metadata.robot_review_last_error}`;
   }
-  const latest = getLatestRobotReview(task);
-  if (latest && !latest.accepted) return "blocked: latest robot review rejected the evidence";
-  if (latest?.accepted) return "accepted robot review present, but the human gate is still closed";
+  if (state === "reviewer_rejected") return "blocked: latest robot review rejected the evidence";
+  if (state === "superseded") return "current evidence superseded, waiting for a new lgtm submission";
   return "blocked: evidence submitted, robot review still required";
 }
 

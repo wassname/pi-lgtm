@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getDisplayStatus, getGateStatus, getReviewBadges } from "../src/review-badges.js";
+import { getCompletionMode, getDisplayStatus, getGateStatus, getReviewBadges, getReviewState } from "../src/review-badges.js";
 import type { Task } from "../src/types.js";
 
 function makeTask(overrides: Partial<Task> = {}): Task {
@@ -57,6 +57,20 @@ describe("getReviewBadges", () => {
     });
 
     expect(getReviewBadges(task)).toBe("[🛠··]");
+  });
+});
+
+describe("review state helpers", () => {
+  it("reports completion mode as direct before any lgtm evidence", () => {
+    expect(getCompletionMode(makeTask())).toBe("direct");
+  });
+
+  it("reports completion mode as lgtm after evidence history exists", () => {
+    expect(getCompletionMode(makeTask({ metadata: { lgtm_history: [{ iteration: 1 }] } }))).toBe("lgtm");
+  });
+
+  it("reports superseded when only history remains", () => {
+    expect(getReviewState(makeTask({ metadata: { lgtm_history: [{ iteration: 1 }] } }))).toBe("superseded");
   });
 });
 

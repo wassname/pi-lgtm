@@ -65,7 +65,7 @@ Lists all tasks. `👀` indicates pending sign-off.
 
 ### `TaskGet`
 
-Full task details including `done_criterion`, approval state, and a one-line gate status such as `ready for human sign-off via /lgtm 5` or `blocked: automatic robot review failed: ...`.
+Full task details including `done_criterion`, approval state, `completion mode`, `review state`, a one-line gate status such as `ready for human sign-off via /lgtm 5` or `blocked: automatic robot review failed: ...`, and evidence-iteration history.
 
 ### `TaskUpdate`
 
@@ -84,12 +84,21 @@ The epistemic gate. Required fields:
 | `falsification_test` | What you ran and what you got, so both you and the human can sanity-check it. Why that result could not occur if a failure mode were real. |
 | `verification_hints` | Where to look and what to check. Descriptions of evidence locations. |
 | `remaining_uncertainty` | What is NOT tested, deferred edge cases, known limitations |
+| `commands` | Optional structured command records: `{ cmd, exit_code, stdout_path?, stderr_path? }` |
+| `evidence_paths` / `falsification_paths` | Optional local artifact paths. Stored as absolute path + sha256 + byte size |
+| `supersede_reason` | Optional reason when this replaces older evidence on the same task |
 
-After calling this, the task shows `👀` and is only completable via `/lgtm <id>`. Evidence is stored on the task so the human can review it hours later without scrolling back.
+After calling this, the task shows `👀` and is only completable via `/lgtm <id>`. Evidence is stored on the task so the human can review it hours later without scrolling back. Re-submitting evidence archives the prior package into superseded history instead of silently overwriting it.
 
 The tool result includes a non-blocking self-check prompt asking whether the evidence directly addresses the `done_criterion` and whether a skeptical reviewer would find it convincing.
 
 `lgtm_ask` always runs the robot-review stage immediately after storing evidence. A failing or errored robot review clears `pending_approval` until the evidence is strengthened and reviewed again.
+
+### `lgtm_supersede`
+
+Explicitly retire the current evidence package without completing the task.
+
+Use this when the claim changed or the prior evidence is stale. The tool archives the current evidence, current robot reviews, and reviewer-failure context into history with your reason, then closes the human gate until new evidence is submitted.
 
 ### `robot_review_ask`
 
@@ -143,9 +152,11 @@ Interactive menu: view tasks, create task, clear completed/all.
 
 ```
 pending -> in_progress -> (lgtm_ask)
-                       -> robot review iteration(s) 🤖
-                       -> pending_approval 👀   if latest robot review passes or no robot review is required
-                       -> strengthen evidence + rerun review   if latest robot review fails
+                       -> current evidence iteration N
+                       -> robot review iteration(s) on current evidence 🤖
+                       -> pending_approval 👀   if latest robot review passes
+                       -> reviewer_failed_to_run | reviewer_rejected
+                       -> lgtm_supersede or newer lgtm_ask -> superseded history + fresh current evidence
                        -> (/lgtm) -> completed
                        -> deleted
 ```
@@ -173,7 +184,7 @@ PI_TASKS_DEBUG=1      # trace to stderr
 
 ```
 src/
-├── index.ts        # 7 tools + /tasks + /lgtm commands + widget + event handlers
+├── index.ts        # 8 tools + /tasks + /lgtm commands + widget + event handlers
 ├── review-badges.ts # Review badge helpers for tool/robot/human lanes
 ├── robot-review.ts # Robot review iteration storage + compatibility helpers
 ├── types.ts        # Task, TaskStatus types

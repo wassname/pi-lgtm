@@ -189,6 +189,17 @@ describe("TaskStore (in-memory)", () => {
     expect(() => store.update("1", { status: "completed" })).toThrow("/lgtm");
   });
 
+  it("blocks TaskUpdate(status=completed) after evidence was superseded into history", () => {
+    store.create("Superseded", "Desc", "done");
+    store.update("1", {
+      metadata: {
+        lgtm_history: [{ iteration: 1, supersede_reason: "threshold changed" }],
+      },
+      pending_approval: false,
+    });
+    expect(() => store.update("1", { status: "completed" })).toThrow("completion_mode=lgtm");
+  });
+
   it("returns not found for update on non-existent task", () => {
     const { task, changedFields } = store.update("999", { status: "in_progress" });
     expect(task).toBeUndefined();

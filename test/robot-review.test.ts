@@ -1,4 +1,8 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { archiveCurrentEvidence, buildArtifactRecords, getCurrentEvidenceIteration, getEvidenceHistory } from "../src/index.js";
 import { appendRobotReviewMetadata, getLatestRobotReview, getRobotReviews, shouldOpenHumanSignoffGate } from "../src/robot-review.js";
 import type { Task } from "../src/types.js";
 
@@ -43,6 +47,38 @@ describe("robot review helpers", () => {
     expect(reviews[0].reviewer).toBe("opencode");
     expect(reviews[0].iteration).toBe(1);
     expect(reviews[0].accepted).toBe(true);
+  });
+
+  it("builds artifact records with absolute path and sha256", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-lgtm-"));
+    const path = join(dir, "evidence.log");
+    writeFileSync(path, "hello\n");
+
+    const [artifact] = buildArtifactRecords([path]);
+    expect(artifact.path).toBe(path);
+    expect(artifact.bytes).toBe(6);
+    expect(artifact.sha256).toHaveLength(64);
+  });
+
+  it("archives current evidence with reason", () => {
+    const task = makeTask({
+      metadata: {
+        lgtm_evidence: "literal output",
+        lgtm_failure_likely: "wrong seed",
+        lgtm_failure_sneaky: "wrong threshold",
+        lgtm_falsification_test: "pytest -k check",
+        lgtm_verification_hints: ["see line 5"],
+        lgtm_remaining_uncertainty: "not load tested",
+        lgtm_submitted_at: "2026-06-07T00:00:00.000Z",
+        lgtm_commands: [{ cmd: "pytest", exit_code: 0 }],
+      },
+    });
+
+    const archived = archiveCurrentEvidence(task, "threshold changed");
+    const taskWithHistory = makeTask({ metadata: archived });
+    expect(getCurrentEvidenceIteration(task)?.iteration).toBe(1);
+    expect(getEvidenceHistory(taskWithHistory)).toHaveLength(1);
+    expect(getEvidenceHistory(taskWithHistory)[0].supersede_reason).toBe("threshold changed");
   });
 
   it("appends robot reviews as iterations", () => {
