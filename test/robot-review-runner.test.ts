@@ -3,6 +3,7 @@ import {
   DEFAULT_ROBOT_REVIEW_TIMEOUT_MS,
   extractFinalAssistantTextFromPiJsonl,
   extractRobotReviewJson,
+  getCurrentModelRef,
   getPiInvocation,
   getRobotReviewTimeoutMs,
   runRobotReviewCommand,
@@ -47,6 +48,12 @@ describe("robot review runner helpers", () => {
   it("uses configured timeout or falls back to default", () => {
     expect(getRobotReviewTimeoutMs({ PI_LGTM_ROBOT_REVIEW_TIMEOUT_MS: "2500" } as NodeJS.ProcessEnv)).toBe(2500);
     expect(getRobotReviewTimeoutMs({ PI_LGTM_ROBOT_REVIEW_TIMEOUT_MS: "bad" } as NodeJS.ProcessEnv)).toBe(DEFAULT_ROBOT_REVIEW_TIMEOUT_MS);
+  });
+
+  it("formats the current model as the reviewer model ref", () => {
+    expect(getCurrentModelRef({ provider: "openai", id: "gpt-5" })).toBe("openai/gpt-5");
+    expect(getCurrentModelRef({ providerId: "anthropic", modelId: "claude-haiku" })).toBe("anthropic/claude-haiku");
+    expect(getCurrentModelRef({ provider: "openai" })).toBeUndefined();
   });
 
   it("times out bounded child commands", async () => {

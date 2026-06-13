@@ -57,10 +57,10 @@ export function getCompletionMode(task: Task): CompletionMode {
 
 export function getReviewState(task: Task): ReviewState {
   if (task.status === "completed") return "human_signed_off";
-  if (task.pending_approval && hasCurrentEvidence(task)) return "ready_for_human";
-  if (typeof task.metadata?.robot_review_last_error === "string") return "reviewer_failed_to_run";
   const latest = getLatestRobotReview(task);
   if (latest && !latest.accepted) return "reviewer_rejected";
+  if (task.pending_approval && hasCurrentEvidence(task)) return "ready_for_human";
+  if (typeof task.metadata?.robot_review_last_error === "string") return "reviewer_failed_to_run";
   if (hasCurrentEvidence(task)) return "evidence_submitted";
   if (hasEvidenceHistory(task)) return "superseded";
   return "no_evidence";
@@ -70,7 +70,12 @@ export function getGateStatus(task: Task): string {
   const state = getReviewState(task);
   if (state === "human_signed_off") return "human signed off";
   if (state === "no_evidence") return "no lgtm evidence submitted";
-  if (state === "ready_for_human") return `ready for human sign-off via /lgtm ${task.id}`;
+  if (state === "ready_for_human") {
+    if (typeof task.metadata?.robot_review_last_error === "string") {
+      return `warning: automatic robot review failed, human sign-off still allowed via /lgtm ${task.id}: ${task.metadata.robot_review_last_error}`;
+    }
+    return `ready for human sign-off via /lgtm ${task.id}`;
+  }
   if (state === "reviewer_failed_to_run") {
     return `blocked: automatic robot review failed: ${task.metadata.robot_review_last_error}`;
   }

@@ -77,27 +77,20 @@ export function getRobotReviewTimeoutMs(env: NodeJS.ProcessEnv = process.env): n
   return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_ROBOT_REVIEW_TIMEOUT_MS;
 }
 
-/**
- * Pick a reviewer model from a different provider than the current one.
- * Prefers cheap/fast models suitable for review tasks.
- * Returns undefined if no alternate provider is available (falls back to same model).
- */
-export function pickAlternateReviewerModel(currentProviderId?: string): string | undefined {
-  // Ordered by: cheap, fast, good enough for structured review
-  const providerModels: Record<string, string> = {
-    anthropic: "anthropic/claude-haiku-4-5",
-    "github-copilot": "github-copilot/gemini-3-flash-preview",
-    openrouter: "openrouter/google/gemini-2.5-flash",
-  };
-  const providers = Object.keys(providerModels);
-  const current = currentProviderId ?? "";
-
-  // Try a different provider first
-  for (const p of providers) {
-    if (p !== current) return providerModels[p];
-  }
-  // All same? Just return the first non-current
-  return providers.length > 0 ? providerModels[providers[0]] : undefined;
+/** Format pi's current model object as the CLI's provider/model reference. */
+export function getCurrentModelRef(model: unknown): string | undefined {
+  if (!model || typeof model !== "object") return undefined;
+  const provider = typeof (model as any).provider === "string"
+    ? (model as any).provider
+    : typeof (model as any).providerId === "string"
+      ? (model as any).providerId
+      : undefined;
+  const id = typeof (model as any).id === "string"
+    ? (model as any).id
+    : typeof (model as any).modelId === "string"
+      ? (model as any).modelId
+      : undefined;
+  return provider && id ? `${provider}/${id}` : undefined;
 }
 
 function getAssistantTextFromPiEvent(event: any): string | undefined {
@@ -583,16 +576,17 @@ function buildRobotReviewPrompt(task: any): string {
 async function runAutomaticRobotReview(
   task: any,
   signal?: AbortSignal,
-  currentProviderId?: string,
+  currentModelRef?: string,
 ): Promise<{ review: Omit<RobotReviewRecord, "iteration">; command: string }> {
+  if (!currentModelRef) {
+    throw new Error("Automatic robot review requires an active current session model.");
+  }
   const prompt = buildRobotReviewPrompt(task);
-  const args = ["--mode", "json", "-p", "--no-session", "--no-tools", "--no-extensions"];
-  const reviewerModel = process.env.PI_LGTM_ROBOT_REVIEW_MODEL?.trim() || pickAlternateReviewerModel(currentProviderId);
-  if (reviewerModel) args.push("--model", reviewerModel);
+  const args = ["--mode", "json", "-p", "--no-session", "--no-tools", "--no-extensions", "--model", currentModelRef];
   args.push(prompt);
   const invocation = getPiInvocation(args);
   const timeoutMs = getRobotReviewTimeoutMs();
-  const commandLabel = `${invocation.command} ${invocation.args.slice(0, reviewerModel ? 6 : 4).join(" ")}`;
+  const commandLabel = `${invocation.command} ${invocation.args.slice(0, -1).join(" ")}`;
   const result = await runRobotReviewCommand(invocation, signal, timeoutMs);
   if (result.exitCode !== 0) {
     const error = new Error(`Robot reviewer failed (${result.exitCode ?? "?"}): ${(result.stderr || result.stdout).trim()}`) as Error & { rawOutput?: string };
@@ -710,14 +704,11 @@ export default function (pi: ExtensionAPI) {
   let currentTurn = 0;
   let lastTaskToolUseTurn = 0;
   let reminderInjectedThisCycle = false;
-  let currentProvider: string | undefined;
 
   pi.on("turn_start", async (_event, ctx) => {
     currentTurn++;
     widget.setUICtx(ctx.ui as UICtx);
     upgradeStoreIfNeeded(ctx);
-    const model = ctx.model;
-    if (model) currentProvider = (model as any).providerId ?? (model as any).provider;
     if (autoClear.onTurnStart(currentTurn)) widget.update();
   });
 
@@ -1035,7 +1026,7 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
       supersede_reason: Type.Optional(Type.String({ description: "Why this evidence replaces an older submission on the same task." })),
     }),
 
-    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const task = store.get(params.taskId);
       if (!task) return Promise.resolve(textResult(`Task #${params.taskId} not found`));
       if (task.status === "completed") return Promise.resolve(textResult(`Task #${params.taskId} already completed`));
@@ -1065,7 +1056,7 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
       const refreshedTask = store.get(params.taskId);
       if (!refreshedTask) return textResult(`Task #${params.taskId} not found after evidence update`);
       try {
-        const { review, command } = await runAutomaticRobotReview(refreshedTask, signal, currentProvider);
+        const { review, command } = await runAutomaticRobotReview(refreshedTask, signal, getCurrentModelRef(ctx.model));
         store.update(params.taskId, {
           pending_approval: shouldOpenHumanSignoffGate(refreshedTask, review.accepted),
           metadata: {
@@ -1091,13 +1082,13 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
         }
       } catch (err: any) {
         store.update(params.taskId, {
-          pending_approval: false,
+          pending_approval: refreshedTask.pending_approval,
           metadata: getAutomaticReviewFailureMetadata(err.message, err.rawOutput),
         });
         robotReviewNote =
           `\n\n### Automatic robot review\n` +
           `Reviewer failed: ${err.message}\n` +
-          `Human sign-off is blocked until the reviewer stage succeeds.` +
+          `Human sign-off is still allowed because reviewer failures are warnings, not evidence rejections.` +
           (typeof err.rawOutput === "string" && err.rawOutput.trim()
             ? `\n\n${formatReviewTextBlock("Reviewer raw output", err.rawOutput.trim())}`
             : "");
@@ -1233,7 +1224,7 @@ This does not complete the task. Human /lgtm remains the only completion path.`,
   pi.registerTool({
     name: "robot_review_run",
     label: "robot_review_run",
-    description: `Run the configured automatic robot reviewer against the current task evidence.
+    description: `Run the automatic robot reviewer against the current task evidence using the current session model.
 
 Runs the same Pi-native reviewer stage used automatically by \`lgtm_ask\`.
 
@@ -1250,7 +1241,7 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
       }
 
       try {
-        const { review, command } = await runAutomaticRobotReview(task, signal, currentProvider);
+        const { review, command } = await runAutomaticRobotReview(task, signal, getCurrentModelRef(_ctx.model));
         store.update(params.taskId, {
           pending_approval: shouldOpenHumanSignoffGate(task, review.accepted),
           metadata: {
@@ -1277,13 +1268,14 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
         );
       } catch (err: any) {
         store.update(params.taskId, {
-          pending_approval: false,
+          pending_approval: task.pending_approval,
           metadata: getAutomaticReviewFailureMetadata(err.message, err.rawOutput),
         });
         widget.update();
         return textResult(
           `## Automatic robot review for task #${task.id}: ${task.subject}\n` +
           `Reviewer failed: ${err.message}\n\n` +
+          `Automatic review failures are warnings, not evidence rejections, so human sign-off is still allowed.\n\n` +
           `Gate status: ${getGateStatus(store.get(params.taskId) ?? task)}` +
           (typeof err.rawOutput === "string" && err.rawOutput.trim()
             ? `\n\n${formatReviewTextBlock("Reviewer raw output", err.rawOutput.trim())}`
@@ -1463,12 +1455,17 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
     if (noEvidence) {
       title = `⚠ Task #${taskId} has no agent-submitted evidence.\nSign off anyway?\nDone: ${task.done_criterion}`;
       signLabel = "✓ Override — sign off without evidence";
-    } else if (reviewerFailed) {
-      title = `⚠ Task #${taskId} automatic robot review failed.\nSign off anyway?\nDone: ${task.done_criterion}`;
-      signLabel = "✓ Override — sign off despite reviewer failure";
     } else if (robotRejected) {
       title = `⚠ Task #${taskId} robot review rejected the evidence.\nSign off anyway?\nDone: ${task.done_criterion}`;
       signLabel = "✓ Override — sign off despite rejected review";
+    } else if (reviewerFailed) {
+      if (task.pending_approval) {
+        title = `⚠ Task #${taskId} automatic robot review failed, but human sign-off is still allowed.\nContinue?\nDone: ${task.done_criterion}`;
+        signLabel = "✓ LGTM — sign off despite reviewer warning";
+      } else {
+        title = `⚠ Task #${taskId} automatic robot review failed.\nSign off anyway?\nDone: ${task.done_criterion}`;
+        signLabel = "✓ Override — sign off despite reviewer failure";
+      }
     }
     const confirm = await ctx.ui.select(title, [signLabel, "✗ Cancel"]);
     if (confirm !== signLabel) return;
@@ -1505,7 +1502,7 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
         };
         for (const t of open) groups[getDisplayStatus(t)].push(t);
         const groupLabel: Record<DisplayStatus, string> = {
-          awaiting_signoff: "READY (robot ✓)",
+          awaiting_signoff: "READY (human sign-off open)",
           in_progress: "ACTIVE (no /lgtm evidence)",
           pending: "PENDING (not started)",
           completed: "DONE",
@@ -1516,7 +1513,11 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
           if (inBucket.length === 0) continue;
           lines.push(`  ${groupLabel[status]}:`);
           for (const t of inBucket) {
-            const warn = status === "awaiting_signoff" && !latestRobotReviewPasses(t) ? " ⚠ robot rejected" : "";
+            const warn = status === "awaiting_signoff"
+              ? (typeof t.metadata?.robot_review_last_error === "string"
+                ? " ⚠ reviewer warning"
+                : (!latestRobotReviewPasses(t) ? " ⚠ robot rejected" : ""))
+              : "";
             lines.push(`    #${t.id} ${t.subject}${warn}`);
           }
         }

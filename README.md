@@ -92,7 +92,7 @@ After calling this, the task shows `👀` and is only completable via `/lgtm <id
 
 The tool result includes a non-blocking self-check prompt asking whether the evidence directly addresses the `done_criterion` and whether a skeptical reviewer would find it convincing.
 
-`lgtm_ask` always runs the robot-review stage immediately after storing evidence. A failing or errored robot review clears `pending_approval` until the evidence is strengthened and reviewed again.
+`lgtm_ask` always runs the robot-review stage immediately after storing evidence. A robot review that rejects the evidence clears `pending_approval` until the evidence is strengthened and reviewed again. A reviewer crash, auth failure, timeout, or malformed output is recorded as a warning and leaves human sign-off open.
 
 ### `lgtm_supersede`
 
@@ -122,21 +122,15 @@ Use this from a separate subagent or other model when possible. Reviews append a
 
 ### `robot_review_run`
 
-Run the configured automatic robot reviewer against the current task evidence.
+Run the automatic robot reviewer against the current task evidence using the current session model.
 
 Default reviewer stage:
 
 ```bash
-pi --mode json -p --no-session
+pi --mode json -p --no-session --no-tools --no-extensions --model <current-session-model>
 ```
 
-Override with:
-
-```bash
-PI_LGTM_ROBOT_REVIEW_MODEL='openai/gpt-5'
-```
-
-This appends a new robot-review iteration. The reviewer returns an explicit `accepted` boolean as well as detailed observations, blind spots, and missing evidence. If the latest robot review rejects the evidence, `/lgtm` is blocked until stronger evidence is submitted and reviewed again.
+This appends a new robot-review iteration. The reviewer returns an explicit `accepted` boolean as well as detailed observations, blind spots, and missing evidence. If the latest robot review rejects the evidence, `/lgtm` is blocked until stronger evidence is submitted and reviewed again. If the reviewer process fails to run or returns malformed output, the failure is recorded but human sign-off stays open.
 
 ## Commands
 
@@ -154,8 +148,8 @@ Interactive menu: view tasks, create task, clear completed/all.
 pending -> in_progress -> (lgtm_ask)
                        -> current evidence iteration N
                        -> robot review iteration(s) on current evidence 🤖
-                       -> pending_approval 👀   if latest robot review passes
-                       -> reviewer_failed_to_run | reviewer_rejected
+                       -> pending_approval 👀   if latest robot review passes, or reviewer infra fails
+                       -> reviewer_rejected
                        -> lgtm_supersede or newer lgtm_ask -> superseded history + fresh current evidence
                        -> (/lgtm) -> completed
                        -> deleted
