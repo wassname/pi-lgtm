@@ -46,6 +46,7 @@ import {
   getRobotReviews,
   latestRobotReviewPasses,
   type RobotReviewRecord,
+  relaxAdvisoryVerificationHints,
   shouldOpenHumanSignoffGate,
 } from "./robot-review.js";
 import { TaskStore } from "./task-store.js";
@@ -530,7 +531,7 @@ function buildRobotReviewPrompt(task: any): string {
     "",
     "## Critical: Evidence must be verbatim",
     "",
-    "Evidence should contain literal output — verbatim command output, exact log lines, markdown block quotes, table rows, URLs — not summaries or interpretations. If the evidence only says 'it worked' or 'returned 5 results' without showing the actual output, flag it under verification_hints_actionable or evidence_covers_done_criterion.",
+    "Evidence should contain literal output — verbatim command output, exact log lines, markdown block quotes, table rows, URLs — not summaries or interpretations. If the evidence only says 'it worked' or 'returned 5 results' without showing the actual output, flag it under evidence_covers_done_criterion or falsification_test_runnable, not verification_hints_actionable.",
     "A human must be able to verify the claim from the evidence alone, without re-running anything. Summaries are not evidence. Literal output is evidence.",
     "",
     "## Rubric (rate each item pass/fail)",
@@ -538,11 +539,11 @@ function buildRobotReviewPrompt(task: any): string {
     "1. evidence_covers_done_criterion: Does the evidence directly address the stated done criterion? Evidence must be verbatim (literal output, not 'it worked').",
     "2. falsification_test_runnable: Is the falsification test concrete enough that someone could run it and get a yes/no result? Must include actual output, not just 'ran X and it worked'.",
     "3. failure_modes_addressed: Are the failure_likely and failure_sneaky plausibly the top failure modes? (Not: are there OTHER failure modes?)",
-    "4. verification_hints_actionable: Can a human follow the verification hints to check the claim without re-running experiments? Hints must reference specific content (line ranges, output snippets, URLs), not bare paths or counts.",
+    "4. verification_hints_actionable: Can a human follow the verification hints to check the claim without re-running experiments? Hints should reference specific content (line ranges, output snippets, URLs), not bare paths or counts.",
     "",
     "Set evidence_complete=true only if items 1 and 2 pass.",
-    "Set evidence_convincing=true only if items 1, 2, AND 4 pass.",
-    "Set accepted=true only if ALL rubric items pass.",
+    "Set evidence_convincing=true only if items 1 and 2 pass. Item 4 is advisory unless it reveals that items 1 or 2 were overstated.",
+    "Set accepted=true only if items 1, 2, and 3 pass. Do not reject solely because verification hints are weak if the verbatim evidence already proves the done criterion.",
     "",
     "Observations: report what you see, not what might be missing. Comments and suggestions go in observations.",
     "missing_evidence: ONLY items from the rubric that failed. Do NOT add new dimensions.",
@@ -623,24 +624,25 @@ async function runAutomaticRobotReview(
     }
     if (Object.keys(r).length > 0) rubric = r;
   }
+  const review = relaxAdvisoryVerificationHints({
+    reviewer: typeof parsed.reviewer === "string" ? parsed.reviewer : commandLabel,
+    scope: typeof parsed.scope === "string" ? parsed.scope : "task evidence package",
+    observations,
+    blind_spots: typeof parsed.blind_spots === "string" ? parsed.blind_spots : "not stated",
+    accepted: typeof parsed.accepted === "boolean"
+      ? parsed.accepted
+      : parsed.evidence_complete === true && parsed.evidence_convincing === true,
+    evidence_complete: parsed.evidence_complete === true,
+    evidence_convincing: parsed.evidence_convincing === true,
+    missing_evidence,
+    submitted_at: new Date().toISOString(),
+    mode: "auto",
+    raw_output: result.stdout.trim(),
+    rubric,
+  });
   return {
     command: commandLabel,
-    review: {
-      reviewer: typeof parsed.reviewer === "string" ? parsed.reviewer : commandLabel,
-      scope: typeof parsed.scope === "string" ? parsed.scope : "task evidence package",
-      observations,
-      blind_spots: typeof parsed.blind_spots === "string" ? parsed.blind_spots : "not stated",
-      accepted: typeof parsed.accepted === "boolean"
-        ? parsed.accepted
-        : parsed.evidence_complete === true && parsed.evidence_convincing === true,
-      evidence_complete: parsed.evidence_complete === true,
-      evidence_convincing: parsed.evidence_convincing === true,
-      missing_evidence,
-      submitted_at: new Date().toISOString(),
-      mode: "auto",
-      raw_output: result.stdout.trim(),
-      rubric,
-    },
+    review,
   };
 }
 

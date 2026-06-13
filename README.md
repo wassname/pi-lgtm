@@ -82,7 +82,7 @@ The epistemic gate. Required fields:
 | `failure_likely` | Most likely way this is wrong despite evidence |
 | `failure_sneaky` | Perverse/silent failure that looks like success superficially |
 | `falsification_test` | What you ran and what you got, so both you and the human can sanity-check it. Why that result could not occur if a failure mode were real. |
-| `verification_hints` | Where to look and what to check. Descriptions of evidence locations. |
+| `verification_hints` | Where to look and what to check. These still force the agent to think, but weak hints are advisory rather than a hard block when the verbatim evidence already proves the claim. Core evidence still has to pass on its own. |
 | `remaining_uncertainty` | What is NOT tested, deferred edge cases, known limitations |
 | `commands` | Optional structured command records: `{ cmd, exit_code, stdout_path?, stderr_path? }` |
 | `evidence_paths` / `falsification_paths` | Optional local artifact paths. Stored as absolute path + sha256 + byte size |
@@ -92,7 +92,7 @@ After calling this, the task shows `👀` and is only completable via `/lgtm <id
 
 The tool result includes a non-blocking self-check prompt asking whether the evidence directly addresses the `done_criterion` and whether a skeptical reviewer would find it convincing.
 
-`lgtm_ask` always runs the robot-review stage immediately after storing evidence. A robot review that rejects the evidence clears `pending_approval` until the evidence is strengthened and reviewed again. A reviewer crash, auth failure, timeout, or malformed output is recorded as a warning and leaves human sign-off open.
+`lgtm_ask` always runs the robot-review stage immediately after storing evidence. A robot review that rejects the evidence clears `pending_approval` until the evidence is strengthened and reviewed again. Weak verification hints are advisory if the core verbatim evidence already proves the done criterion. A reviewer crash, auth failure, timeout, or malformed output is recorded as a warning and leaves human sign-off open.
 
 ### `lgtm_supersede`
 

@@ -105,6 +105,27 @@ export function shouldOpenHumanSignoffGate(task: Task, reviewAccepted: boolean):
   return reviewAccepted && typeof task.metadata?.lgtm_evidence === "string" && task.metadata.lgtm_evidence.length > 0;
 }
 
+export function relaxAdvisoryVerificationHints(review: Omit<RobotReviewRecord, "iteration">): Omit<RobotReviewRecord, "iteration"> {
+  const rubric = review.rubric;
+  if (!rubric || review.evidence_complete !== true) return review;
+  const requiredCoreKeys = ["evidence_covers_done_criterion", "falsification_test_runnable", "failure_modes_addressed"];
+  if (!requiredCoreKeys.every((key) => rubric[key]?.pass === true)) return review;
+  const failedKeys = Object.entries(rubric)
+    .filter(([, item]) => item.pass !== true)
+    .map(([key]) => key);
+  if (failedKeys.length !== 1 || failedKeys[0] !== "verification_hints_actionable") return review;
+  return {
+    ...review,
+    accepted: true,
+    evidence_convincing: true,
+    observations: [
+      ...review.observations,
+      "Verification hints were weak, but treated as advisory because the verbatim evidence already covered the done criterion.",
+    ],
+    missing_evidence: review.missing_evidence.filter((item) => item !== "verification_hints_actionable" && !/verification hint/i.test(item)),
+  };
+}
+
 export function appendRobotReviewMetadata(task: Task, review: Omit<RobotReviewRecord, "iteration">): Record<string, unknown> {
   const robot_reviews = [...getRobotReviews(task), { ...review, iteration: 0 }].map((entry, index) => ({
     ...entry,

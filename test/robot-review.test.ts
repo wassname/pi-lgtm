@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { archiveCurrentEvidence, buildArtifactRecords, getCurrentEvidenceIteration, getEvidenceHistory } from "../src/index.js";
-import { appendRobotReviewMetadata, getLatestRobotReview, getRobotReviews, shouldOpenHumanSignoffGate } from "../src/robot-review.js";
+import { appendRobotReviewMetadata, getLatestRobotReview, getRobotReviews, relaxAdvisoryVerificationHints, shouldOpenHumanSignoffGate } from "../src/robot-review.js";
 import type { Task } from "../src/types.js";
 
 function makeTask(overrides: Partial<Task> = {}): Task {
@@ -79,6 +79,56 @@ describe("robot review helpers", () => {
     expect(getCurrentEvidenceIteration(task)?.iteration).toBe(1);
     expect(getEvidenceHistory(taskWithHistory)).toHaveLength(1);
     expect(getEvidenceHistory(taskWithHistory)[0].supersede_reason).toBe("threshold changed");
+  });
+
+  it("treats verification hints as advisory when core evidence already passes", () => {
+    const review = relaxAdvisoryVerificationHints({
+      reviewer: "auto",
+      scope: "task evidence",
+      observations: ["Observed commit, push, and test logs"],
+      blind_spots: "Did not inspect interactive UI",
+      accepted: false,
+      evidence_complete: true,
+      evidence_convincing: false,
+      missing_evidence: ["verification_hints_actionable"],
+      submitted_at: "2026-06-13T00:00:00.000Z",
+      mode: "auto",
+      rubric: {
+        evidence_covers_done_criterion: { reason: "verbatim logs match", pass: true },
+        falsification_test_runnable: { reason: "command and output shown", pass: true },
+        failure_modes_addressed: { reason: "plausible top risks named", pass: true },
+        verification_hints_actionable: { reason: "paths are vague", pass: false },
+      },
+    });
+
+    expect(review.accepted).toBe(true);
+    expect(review.evidence_convincing).toBe(true);
+    expect(review.observations.at(-1)).toContain("treated as advisory");
+    expect(review.missing_evidence).toEqual([]);
+  });
+
+  it("does not relax verification hints unless the core rubric passes", () => {
+    const review = relaxAdvisoryVerificationHints({
+      reviewer: "auto",
+      scope: "task evidence",
+      observations: ["Observed vague summary only"],
+      blind_spots: "Did not rerun tests",
+      accepted: false,
+      evidence_complete: true,
+      evidence_convincing: false,
+      missing_evidence: ["verification_hints_actionable"],
+      submitted_at: "2026-06-13T00:00:00.000Z",
+      mode: "auto",
+      rubric: {
+        evidence_covers_done_criterion: { reason: "summary only", pass: false },
+        falsification_test_runnable: { reason: "command and output shown", pass: true },
+        failure_modes_addressed: { reason: "plausible top risks named", pass: true },
+        verification_hints_actionable: { reason: "paths are vague", pass: false },
+      },
+    });
+
+    expect(review.accepted).toBe(false);
+    expect(review.evidence_convincing).toBe(false);
   });
 
   it("appends robot reviews as iterations", () => {
