@@ -32,13 +32,11 @@ import { Type } from "@sinclair/typebox";
 import { AutoClearManager } from "./auto-clear.js";
 import {
   type CompletionMode,
-  type DisplayStatus,
   getCompletionMode,
   getDisplayStatus,
   getGateStatus,
   getReviewBadges,
   getReviewState,
-  getStateTag,
   type ReviewState,
 } from "./review-badges.js";
 import {
@@ -955,42 +953,47 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "TaskList",
     label: "TaskList",
-    description: `List all tasks grouped by status. State tag: [ACTIVE] [PENDING] [DONE]. Pipeline stages: [🛠🤖✓] = evidence→review→completed (·=pending).`,
+    description: `List all tasks in a compact one-line format with one primary state per row. Proof details live in TaskGet and /lgtm.`,
     parameters: Type.Object({}),
 
     execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
       const tasks = store.list();
       if (tasks.length === 0) return Promise.resolve(textResult("No tasks found"));
 
+      const counts = { completed: 0, in_progress: 0, pending: 0 };
+      for (const task of tasks) counts[getDisplayStatus(task)]++;
+
+      const parts: string[] = [];
+      if (counts.completed > 0) parts.push(`${counts.completed} done`);
+      if (counts.in_progress > 0) parts.push(`${counts.in_progress} in progress`);
+      if (counts.pending > 0) parts.push(`${counts.pending} open`);
+
+      const statusIcon = (task: typeof tasks[number]) => {
+        if (task.status === "completed") return "✔";
+        if (task.status === "in_progress") return "◼";
+        return "◻";
+      };
+
       const renderTask = (task: typeof tasks[number]) => {
-        const parent = task.parentId ? ` [subtask of #${task.parentId}]` : "";
-        let line = `  [${getStateTag(task).padEnd(7)}] #${task.id} ${task.subject}${parent} ${getReviewBadges(task)}`;
+        const parent = task.parentId ? ` › subtask of #${task.parentId}` : "";
+        let blocked = "";
         if (task.blockedBy.length > 0) {
           const openBlockers = task.blockedBy.filter(bid => {
             const blocker = store.get(bid);
             return blocker && blocker.status !== "completed";
           });
-          if (openBlockers.length > 0) line += ` [blocked by ${openBlockers.map(id => "#" + id).join(", ")}]`;
+          if (openBlockers.length > 0) blocked = ` › blocked by ${openBlockers.map(id => "#" + id).join(", ")}`;
         }
-        return line;
+        const subject = task.status === "completed" ? `${task.subject}` : task.subject;
+        return `  ${statusIcon(task)} #${task.id} ${subject}${parent}${blocked}`;
       };
 
-      const buckets: { label: string; status: DisplayStatus }[] = [
-        { label: "Active", status: "in_progress" },
-        { label: "Pending", status: "pending" },
-        { label: "Completed", status: "completed" },
+      const lines = [
+        `● ${tasks.length} tasks (${parts.join(", ")})`,
+        ...tasks.sort((a, b) => Number(a.id) - Number(b.id)).map(renderTask),
       ];
 
-      const sections: string[] = [];
-      for (const { label, status } of buckets) {
-        const inBucket = tasks
-          .filter(t => getDisplayStatus(t) === status)
-          .sort((a, b) => Number(a.id) - Number(b.id));
-        if (inBucket.length === 0) continue;
-        sections.push(`${label}:\n${inBucket.map(renderTask).join("\n")}`);
-      }
-
-      return Promise.resolve(textResult(sections.join("\n\n")));
+      return Promise.resolve(textResult(lines.join("\n")));
     },
   });
 
@@ -1491,9 +1494,7 @@ This appends a new robot-review iteration. If accepted for a top-level proof tas
           return "◻";
         };
 
-        const choices = tasks.map(t => {
-          return `${statusIcon(t)} #${t.id} [${t.status}] ${t.subject} ${getReviewBadges(t)}`;
-        });
+        const choices = tasks.map(t => `${statusIcon(t)} #${t.id} ${t.subject}`);
         choices.push("← Back");
 
         const selected = await ui.select("Tasks", choices);

@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { REVIEW_BADGES } from "../src/review-badges.js";
 import { TaskStore } from "../src/task-store.js";
 import { TaskWidget, type Theme, type UICtx } from "../src/ui/task-widget.js";
 
@@ -73,11 +72,12 @@ describe("TaskWidget", () => {
     widget.update();
 
     const lines = renderWidget(ui.state);
-    expect(lines).toHaveLength(3); // header + 1 task + done_criterion
+    expect(lines).toHaveLength(2); // header + 1 task
     expect(lines[0]).toContain("1 tasks");
     expect(lines[0]).toContain("1 open");
     expect(lines[1]).toContain("◻");
     expect(lines[1]).toContain("Do something");
+    expect(lines[1]).not.toContain("done");
   });
 
   it("renders in-progress tasks with ◼ icon", () => {
@@ -100,16 +100,18 @@ describe("TaskWidget", () => {
     expect(lines[1]).toContain("~~#1 Done task~~");
   });
 
-  it("renders robot review badges on completed tasks", () => {
+  it("does not render proof badges on collapsed rows", () => {
     store.create("Done task", "Desc", "done");
     store.update("1", {
-      metadata: { robot_review_observations: ["Observed output drift on seed 2"] },
+      metadata: { robot_review_observations: ["Observed output drift on seed 2"], lgtm_evidence: "verbatim output" },
     });
     store.complete("1");
     widget.update();
 
     const lines = renderWidget(ui.state);
-    expect(lines[1]).toContain(REVIEW_BADGES.robot);
+    expect(lines[1]).not.toContain("[");
+    expect(lines[1]).not.toContain("🛠");
+    expect(lines[1]).not.toContain("🤖");
   });
 
   it("renders active tasks with spinner icon", () => {
@@ -181,9 +183,9 @@ describe("TaskWidget", () => {
     widget.update();
 
     const lines = renderWidget(ui.state);
-    // header + 5 visible tasks (each has 2 lines: task + done_criterion) + "...and 10 more"
-    expect(lines).toHaveLength(12);
-    expect(lines[11]).toContain("10 more");
+    // header + 5 visible tasks + "...and 10 more"
+    expect(lines).toHaveLength(7);
+    expect(lines[6]).toContain("10 more");
   });
 
   it("tracks token usage for active tasks", () => {
@@ -241,7 +243,7 @@ describe("TaskWidget", () => {
 
     const lines = renderWidget(ui.state);
     expect(lines[1]).toContain("Processing A…");
-    expect(lines[3]).toContain("Processing B…");
+    expect(lines[2]).toContain("Processing B…");
   });
 
   it("distributes token usage across all active tasks", () => {
@@ -257,7 +259,7 @@ describe("TaskWidget", () => {
     const lines = renderWidget(ui.state);
     // Both tasks should have the same token counts
     expect(lines[1]).toContain("↑ 100");
-    expect(lines[3]).toContain("↑ 100");
+    expect(lines[2]).toContain("↑ 100");
   });
 
   it("dispose clears widget and timer", () => {
