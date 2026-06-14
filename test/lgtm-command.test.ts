@@ -55,9 +55,10 @@ describe("parseLgtmArgs", () => {
   });
 
   it("rejects task-management forms", () => {
-    expect(parseLgtmArgs("clear")).toEqual({ kind: "error", message: "Task clearing lives in /tasks now. /lgtm is viewer-only." });
-    expect(parseLgtmArgs("clear *")).toEqual({ kind: "error", message: "Task clearing lives in /tasks now. /lgtm is viewer-only." });
-    expect(parseLgtmArgs("clear #7")).toEqual({ kind: "error", message: "Task clearing lives in /tasks now. /lgtm is viewer-only." });
+    expect(parseLgtmArgs("clear")).toEqual({ kind: "error", message: "Task management lives in /tasks now. /lgtm is viewer-only." });
+    expect(parseLgtmArgs("clear *")).toEqual({ kind: "error", message: "Task management lives in /tasks now. /lgtm is viewer-only." });
+    expect(parseLgtmArgs("clear #7")).toEqual({ kind: "error", message: "Task management lives in /tasks now. /lgtm is viewer-only." });
+    expect(parseLgtmArgs("delete #7")).toEqual({ kind: "error", message: "Task management lives in /tasks now. /lgtm is viewer-only." });
   });
 });
 
@@ -104,6 +105,20 @@ describe("/lgtm command", () => {
     await command.handler("clear 1", { ui });
 
     expect(harness.sentMessages).toHaveLength(0);
-    expect(ui.notify).toHaveBeenCalledWith("Task clearing lives in /tasks now. /lgtm is viewer-only.", "error");
+    expect(ui.notify).toHaveBeenCalledWith("Task management lives in /tasks now. /lgtm is viewer-only.", "error");
+  });
+
+  it("rejects /lgtm delete and points task management back to /tasks", async () => {
+    const harness = makeHarness();
+    await harness.execTool("TaskCreate", { subject: "Task A", description: "Desc", done_criterion: "done" });
+
+    const ui = harness.makeUi();
+    const command = harness.commands.get("lgtm");
+    if (!command) throw new Error("/lgtm not registered");
+
+    await command.handler("delete 1", { ui });
+
+    expect(harness.sentMessages).toHaveLength(0);
+    expect(ui.notify).toHaveBeenCalledWith("Task management lives in /tasks now. /lgtm is viewer-only.", "error");
   });
 });

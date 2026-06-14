@@ -70,8 +70,8 @@ export function parseLgtmArgs(args: string): LgtmCommandSpec {
   if (trimmed === "*") return { kind: "view_all" };
 
   const tokens = trimmed.split(/[\s,]+/).map(token => token.trim()).filter(Boolean);
-  if (tokens[0] === "clear") {
-    return { kind: "error", message: "Task clearing lives in /tasks now. /lgtm is viewer-only." };
+  if (["clear", "delete"].includes(tokens[0])) {
+    return { kind: "error", message: "Task management lives in /tasks now. /lgtm is viewer-only." };
   }
 
   return { kind: "view", ids: tokens.map(token => token.replace(/^#/, "")).filter(Boolean) };
