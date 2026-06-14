@@ -249,7 +249,7 @@ describe("robot review helpers", () => {
 			"Do not reject solely because items 3, 4, or 5 are weak",
 		);
 		expect(prompt).toContain(
-			"concrete missing artifacts, command outputs, written-file checks",
+			"concrete missing artifacts or outputs that block acceptance",
 		);
 	});
 
@@ -373,10 +373,8 @@ describe("robot review helpers", () => {
 		expect(log).toContain("### Verify");
 		expect(log).toContain("### Judgement");
 		expect(log).toContain("Refused by auto");
-		expect(log).toContain("### Observations");
-		expect(log).toContain("### Concerns");
-		expect(log).toContain("### Missing evidence");
-		expect(log).toContain("### Suggestions");
+		expect(log).toContain("Needs:");
+		expect(log).toContain("Next:");
 		expect(log).toContain("Run one self-hosted TaskClaimDone UAT.");
 	});
 
@@ -438,10 +436,7 @@ describe("robot review helpers", () => {
 		expect(log).toContain("completed with reviewer unavailable");
 		expect(log).toContain("### Judgement");
 		expect(log).toContain("judge auth failed");
-		expect(log).toContain("### Suggestions");
-		expect(log).not.toContain("### Missing evidence");
-		expect(log).not.toContain("### Observations");
-		expect(log).not.toContain("### Concerns");
 		expect(log).toContain("Autonomy continued without blocking completion.");
+		expect(log).not.toContain("Needs:");
 	});
 });

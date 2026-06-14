@@ -346,6 +346,7 @@ const ROBOT_REVIEW_KEYS = [
 	"robot_review_submitted_at",
 	"robot_review_mode",
 	"robot_review_raw_output",
+	"robot_review_reason",
 	"robot_review_requires_followup",
 	"robot_review_iteration_count",
 ] as const;
@@ -855,29 +856,21 @@ function renderTaskUpdateSummary(
 }
 
 function renderCompactRobotReview(review: RobotReviewRecord): string {
-	return [
-		`### Judge`,
-		`${review.accepted ? "Accepted" : "Refused"} by ${review.reviewer} on ${review.submitted_at}.`,
-		`Evidence complete: ${review.evidence_complete ? "yes" : "no"}`,
-		`Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}`,
-		review.observations.length > 0
-			? formatBulletList("Observations", summarizeList(review.observations))
-			: "",
-		review.concerns.length > 0
-			? formatBulletList("Concerns", summarizeList(review.concerns))
-			: "",
-		review.missing_evidence.length > 0
-			? formatBulletList(
-					"Missing evidence",
-					summarizeList(review.missing_evidence),
-				)
-			: "",
-		review.suggestions.length > 0
-			? formatBulletList("Suggestions", summarizeList(review.suggestions))
-			: "",
-	]
-		.filter(Boolean)
-		.join("\n\n");
+	const verdict = review.accepted ? "Accepted" : "Refused";
+	const lines = [`${verdict} by ${review.reviewer}.`];
+	if (review.reason) {
+		lines.push(review.reason);
+	} else if (review.observations.length > 0) {
+		lines.push(review.observations[0]);
+	}
+	if (review.blind_spots) lines.push(`Blind spots: ${review.blind_spots}`);
+	if (!review.accepted && review.missing_evidence.length > 0) {
+		lines.push(`Needs: ${review.missing_evidence.join("; ")}`);
+	}
+	if (!review.accepted && review.suggestions.length > 0) {
+		lines.push(`Next: ${review.suggestions.join("; ")}`);
+	}
+	return lines.join(" ");
 }
 
 function renderCurrentProofSummary(task: Task): string {
@@ -984,22 +977,12 @@ function renderAttempt(
 		`- unknown left: ${presentOrMissing(entry.failure_unknown)}`,
 		`- why this counts: ${presentOrMissing(entry.evidence_reasoning)}`,
 		`- remaining uncertainty: ${presentOrMissing(entry.remaining_uncertainty)}`,
-		`### Judgement\n${judgement.title}\n\n${judgement.body}`,
-		judgement.observations.length > 0
-			? formatBulletList("Observations", summarizeList(judgement.observations))
-			: "",
-		judgement.concerns.length > 0
-			? formatBulletList("Concerns", summarizeList(judgement.concerns))
-			: "",
-		judgement.missingEvidence.length > 0
-			? formatBulletList(
-					"Missing evidence",
-					summarizeList(judgement.missingEvidence),
-				)
-			: "",
-		judgement.suggestions.length > 0
-			? formatBulletList("Suggestions", summarizeList(judgement.suggestions))
-			: "",
+		`### Judgement\n${judgement.title}`,
+		judgement.body,
+		judgement.observations.length > 0 ? judgement.observations[0] : "",
+		judgement.concerns.length > 0 ? `Concerns: ${judgement.concerns.join("; ")}` : "",
+		judgement.missingEvidence.length > 0 ? `Needs: ${judgement.missingEvidence.join("; ")}` : "",
+		judgement.suggestions.length > 0 ? `Next: ${judgement.suggestions.join("; ")}` : "",
 	]
 		.filter(Boolean)
 		.join("\n\n");
@@ -1149,22 +1132,24 @@ export function buildRobotReviewPrompt(task: Task): string {
 		"Set evidence_convincing=true if items 1 and 2 pass and you do not see a concrete contradiction in the packet.",
 		"Set accepted=true if items 1 and 2 pass and you do not see a concrete contradiction in the packet. Do not reject solely because items 3, 4, or 5 are weak if the verbatim evidence already proves the done criterion.",
 		"",
-		"observations: what you literally saw in the packet.",
+		"reason: 1-3 sentence summary of why you accepted or rejected. Be concrete: cite specific test counts, file paths, or output lines you checked. Example: 'Pass, I checked the evidence it shows all 142 tests pass and HEAD=origin/main.'",
+		"observations: kept for audit only. One line max, not a repeat of the evidence.",
 		"When rejecting, prefer missing outputs like 'nll_val never decreases in the quoted log' over process complaints like 'too much text'.",
-		"concerns: concise reasons the current evidence may not prove success yet.",
-		"suggestions: what the agent should do next if the evidence is not yet enough. Keep this short, ideally 1-3 bullets.",
-		"missing_evidence: concrete missing artifacts, command outputs, written-file checks, or observations that block acceptance. Prefer phrases like 'literal pytest output' or 'contents of output.json', not abstract rubric labels.",
+		"concerns: kept for audit only. One line max when rejecting, empty when accepting.",
+		"suggestions: what the agent should do next if rejected. 1-3 bullets max.",
+		"missing_evidence: concrete missing artifacts or outputs that block acceptance. Only when rejecting.",
+		"blind_spots: what you could not check. Always include this. Example: 'only reviewed the verbatim packet, did not inspect the actual artifact files.'",
 		"",
 		"Return exactly one JSON object between the markers ROBOT_REVIEW_JSON_START and ROBOT_REVIEW_JSON_END.",
 		"JSON schema:",
-		'{"reviewer":"string","scope":"string","rubric":{"evidence_covers_done_criterion":{"reason":"...","pass":true},"falsification_test_runnable":{"reason":"...","pass":true},"failure_modes_addressed":{"reason":"...","pass":true},"evidence_distinguishes_success":{"reason":"...","pass":true},"verification_hints_actionable":{"reason":"...","pass":true}},"observations":["string"],"concerns":["string"],"suggestions":["string"],"blind_spots":"string","missing_evidence":["string"],"evidence_complete":true,"evidence_convincing":true,"accepted":true}',
+		'{"reviewer":"string","scope":"string","rubric":{"evidence_covers_done_criterion":{"reason":"...","pass":true},"falsification_test_runnable":{"reason":"...","pass":true},"failure_modes_addressed":{"reason":"...","pass":true},"evidence_distinguishes_success":{"reason":"...","pass":true},"verification_hints_actionable":{"reason":"...","pass":true}},"reason":"1-3 sentence summary of why you accepted or rejected","observations":["string"],"concerns":["string"],"suggestions":["string"],"blind_spots":"string","missing_evidence":["string"],"evidence_complete":true,"evidence_convincing":true,"accepted":true}',
 		"",
 		"You are reviewing exactly the same proof packet shown by TaskGet and /lgtm. Do not assume hidden context beyond this packet.",
 		"",
 		renderEvidencePacket(task, { truncateEvidence: false }),
 		"Output format:",
 		"ROBOT_REVIEW_JSON_START",
-		'{"reviewer":"...","scope":"...","rubric":{...},"observations":["..."],"concerns":["..."],"suggestions":["..."],"blind_spots":"...","missing_evidence":["..."],"evidence_complete":true,"evidence_convincing":true,"accepted":true}',
+		'{"reviewer":"...","scope":"...","rubric":{...},"reason":"Pass, I checked the evidence it shows all 142 tests pass and HEAD=origin/main.","observations":["..."],"concerns":["..."],"suggestions":["..."],"blind_spots":"...","missing_evidence":["..."],"evidence_complete":true,"evidence_convincing":true,"accepted":true}',
 		"ROBOT_REVIEW_JSON_END",
 	].join("\n");
 }

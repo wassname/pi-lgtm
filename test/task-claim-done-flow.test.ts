@@ -130,8 +130,7 @@ console.log("ROBOT_REVIEW_JSON_END");
 		);
 		expect(text).toContain("### Judgement");
 		expect(text).toContain("Refused");
-		expect(text).toContain("### Missing evidence");
-		expect(text).toContain("### Suggestions");
+		expect(text).toContain("Needs:");
 		expect(text).toContain("Add one more artifact");
 	});
 
@@ -178,10 +177,8 @@ console.log("ROBOT_REVIEW_JSON_START and nope ROBOT_REVIEW_JSON_END");
 		expect(text).toContain("Status: completed");
 		expect(text).toContain("completed with reviewer unavailable");
 		expect(text).toContain("Raw output:");
-		expect(text).toContain("### Suggestions");
-		expect(text).not.toContain("### Missing evidence\n- (none)");
-		expect(text).not.toContain("### Observations\n- (none)");
-		expect(text).not.toContain("### Concerns\n- (none)");
+		expect(text).toContain("Autonomy continued without blocking completion.");
+		expect(text).not.toContain("Needs:");
 		expect(text).toContain(
 			"ROBOT_REVIEW_JSON_START and nope ROBOT_REVIEW_JSON_END",
 		);

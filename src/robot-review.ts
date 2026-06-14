@@ -6,6 +6,7 @@ export interface RobotReviewRecord {
 	iteration: number;
 	reviewer: string;
 	scope: string;
+	reason?: string;
 	observations: string[];
 	concerns: string[];
 	suggestions: string[];
@@ -64,6 +65,8 @@ function normalizeReview(
 			typeof review.iteration === "number" ? review.iteration : index + 1,
 		reviewer,
 		scope,
+		reason:
+			typeof review.reason === "string" ? review.reason : undefined,
 		observations,
 		concerns: toStringArray(review.concerns),
 		suggestions: toStringArray(review.suggestions),
@@ -113,6 +116,10 @@ function getLegacyRobotReview(task: Task): RobotReviewRecord | undefined {
 			typeof task.metadata?.robot_review_scope === "string"
 				? task.metadata.robot_review_scope
 				: "unknown",
+		reason:
+			typeof task.metadata?.robot_review_reason === "string"
+				? task.metadata.robot_review_reason
+				: undefined,
 		observations,
 		concerns: toStringArray(task.metadata?.robot_review_concerns),
 		suggestions: toStringArray(task.metadata?.robot_review_suggestions),
@@ -289,6 +296,7 @@ export function appendRobotReviewMetadata(
 		robot_review_missing_evidence: latest.missing_evidence,
 		robot_review_submitted_at: latest.submitted_at,
 		robot_review_mode: latest.mode,
+		robot_review_reason: latest.reason ?? null,
 		robot_review_raw_output: latest.raw_output ?? null,
 		robot_review_requires_followup: !(
 			latest.evidence_complete && latest.evidence_convincing
