@@ -1,7 +1,7 @@
 import { getLatestRobotReview, getRobotReviews } from "./robot-review.js";
 import type { Task } from "./types.js";
 
-const STAGES = ["🛠", "🤖", "👀"] as const;
+const STAGES = ["🛠", "🤖", "✓"] as const;
 
 function hasCurrentEvidence(task: Task): boolean {
   return typeof task.metadata?.lgtm_evidence === "string" && task.metadata.lgtm_evidence.length > 0;
@@ -11,12 +11,12 @@ function hasEvidenceHistory(task: Task): boolean {
   return Array.isArray(task.metadata?.lgtm_history) && task.metadata.lgtm_history.length > 0;
 }
 
-/** Pipeline stages: `[🛠·🤖·👀]` fills left-to-right as evidence→review→signoff progresses. */
+/** Pipeline stages: `[🛠·🤖·✓]` fills left-to-right as evidence→review→completed progresses. */
 export function getReviewBadges(task: Task): string {
   const filled = [
     !!task.metadata?.lgtm_evidence,
     getRobotReviews(task).length > 0,
-    task.pending_approval && task.status !== "completed",
+    task.status === "completed",
   ];
   const slots = STAGES.map((emoji, i) => filled[i] ? emoji : "·");
   return `[${slots.join("")}]`;
@@ -25,77 +25,74 @@ export function getReviewBadges(task: Task): string {
 export const REVIEW_BADGES = {
   evidence: STAGES[0],
   robot: STAGES[1],
-  human: STAGES[2],
+  complete: STAGES[2],
   pipeline: STAGES,
 };
 
-export type DisplayStatus = "awaiting_signoff" | "in_progress" | "pending" | "completed";
+export type DisplayStatus = "in_progress" | "pending" | "completed";
 
-/** Derived display bucket. `awaiting_signoff` is pending_approval && !completed. */
 export function getDisplayStatus(task: Task): DisplayStatus {
-  if (task.status === "completed") return "completed";
-  if (task.pending_approval) return "awaiting_signoff";
   return task.status;
 }
 
-export type CompletionMode = "direct" | "lgtm";
+export type CompletionMode = "direct" | "proof";
 export type ReviewState =
-  | "no_evidence"
-  | "evidence_submitted"
+  | "no_claim"
+  | "claim_submitted"
   | "reviewer_failed_to_run"
   | "reviewer_rejected"
-  | "ready_for_human"
+  | "reviewer_accepted"
   | "superseded"
-  | "human_signed_off";
-export type StateTag = "READY" | "ACTIVE" | "PENDING" | "DONE";
+  | "completed";
+export type StateTag = "ACTIVE" | "PENDING" | "DONE";
 
 export function getCompletionMode(task: Task): CompletionMode {
-  return hasCurrentEvidence(task) || hasEvidenceHistory(task) || getRobotReviews(task).length > 0 || task.pending_approval
-    ? "lgtm"
-    : "direct";
+  return task.parentId ? "direct" : "proof";
 }
 
 export function getReviewState(task: Task): ReviewState {
-  if (task.status === "completed") return "human_signed_off";
+  if (task.status === "completed") return "completed";
   const latest = getLatestRobotReview(task);
   if (latest && !latest.accepted) return "reviewer_rejected";
-  if (task.pending_approval && hasCurrentEvidence(task)) return "ready_for_human";
+  if (latest?.accepted) return "reviewer_accepted";
   if (typeof task.metadata?.robot_review_last_error === "string") return "reviewer_failed_to_run";
-  if (hasCurrentEvidence(task)) return "evidence_submitted";
+  if (hasCurrentEvidence(task)) return "claim_submitted";
   if (hasEvidenceHistory(task)) return "superseded";
-  return "no_evidence";
+  return "no_claim";
 }
 
 export function getGateStatus(task: Task): string {
   const state = getReviewState(task);
-  if (state === "human_signed_off") return "human signed off";
-  if (state === "no_evidence") return "no lgtm evidence submitted";
-  if (state === "ready_for_human") {
+  if (task.parentId) {
+    return task.status === "completed" ? "completed directly as subtask" : "subtask: direct completion allowed";
+  }
+  if (task.status === "completed") {
     if (typeof task.metadata?.robot_review_last_error === "string") {
-      return `warning: automatic robot review failed, human sign-off still allowed via /lgtm ${task.id}: ${task.metadata.robot_review_last_error}`;
+      return `completed with reviewer unavailable: ${task.metadata.robot_review_last_error}`;
     }
-    return `ready for human sign-off via /lgtm ${task.id}`;
+    if (getLatestRobotReview(task)?.accepted) return "completed after accepted proof review";
+    return "completed";
   }
+  if (state === "no_claim") return "top-level task requires TaskClaimDone evidence before completion";
+  if (state === "reviewer_accepted") return "review accepted; task should be completed";
   if (state === "reviewer_failed_to_run") {
-    return `blocked: automatic robot review failed: ${task.metadata.robot_review_last_error}`;
+    return `review unavailable; autonomy continues: ${task.metadata.robot_review_last_error}`;
   }
-  if (state === "reviewer_rejected") return "blocked: latest robot review rejected the evidence";
-  if (state === "superseded") return "current evidence superseded, waiting for a new lgtm submission";
-  return "blocked: evidence submitted, robot review still required";
+  if (state === "reviewer_rejected") return "latest proof review rejected the evidence; strengthen the proof and try again";
+  if (state === "superseded") return "current evidence superseded, waiting for a new proof claim";
+  return "proof claim submitted, automatic review still required";
 }
 
-/** Short uppercase tag for the human ("can I /lgtm this?" at a glance). */
+/** Short uppercase tag for compact task-list display. */
 export function getStateTag(task: Task): StateTag {
   const s = getDisplayStatus(task);
   if (s === "completed") return "DONE";
-  if (s === "awaiting_signoff") return "READY";
   if (s === "in_progress") return "ACTIVE";
   return "PENDING";
 }
 
 /** Theme colour key for each state tag (only theme colours present in pi-tui are used). */
-export function getStateTagColor(tag: StateTag): "success" | "accent" | "dim" | undefined {
-  if (tag === "READY") return "success";
+export function getStateTagColor(tag: StateTag): "accent" | "dim" | undefined {
   if (tag === "ACTIVE") return "accent";
   if (tag === "DONE") return "dim";
   return undefined; // PENDING — default fg

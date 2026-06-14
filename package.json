@@ -1,7 +1,7 @@
 {
-  "name": "@wassname2/pi-lgtm",
+  "name": "@wassname2/pi-proof-tasks",
   "version": "0.4.2",
-  "description": "A pi extension providing goal tracking with structural sign-off and LGTM workflow.",
+  "description": "Hermes-style evidence + judge task list for Pi, with proof-gated top-level completion and UAT logs.",
   "author": "wassname",
   "license": "MIT",
   "repository": {
@@ -16,9 +16,13 @@
     "pi-package",
     "pi",
     "pi-extension",
-    "lgtm",
-    "sign-off",
-    "goal-tracking"
+    "proof",
+    "judge",
+    "uat",
+    "evidence",
+    "task-list",
+    "failure-modes",
+    "hermes-style"
   ],
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.62.0",

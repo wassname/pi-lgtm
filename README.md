@@ -1,4 +1,4 @@
-# @wassname/pi-lgtm
+# @wassname2/pi-proof-tasks
 
 Original ask:
 > I would like a task list where
@@ -7,18 +7,18 @@ Original ask:
 > 3) A submit_proof form where a subagent provides independant sanity check of on the evidence before completing
 > 4) - wassname
 
-Help your agent track goals and aim for human sign off.
+Hermes-style evidence + judge task list for Pi.
 
-A [pi](https://pi.dev) extension that adds structured human sign-off to task tracking. Fork of [@tintinweb/pi-tasks](https://github.com/tintinweb/pi-tasks) with a minimal LGTM layer.
+A [pi](https://pi.dev) extension that adds proof-gated top-level tasks to task tracking. Fork of [@tintinweb/pi-tasks](https://github.com/tintinweb/pi-tasks) with an evidence/review layer inspired by `/until-done`.
 
-The core idea: agents cannot mark tasks complete themselves. They must call `lgtm_ask` with auditable evidence and explicit failure-mode analysis, then a human signs off via `/lgtm <id>`.
+The core idea: subtasks are normal checklist items, but top-level tasks are goals. Agents cannot mark top-level tasks complete directly. They must call `TaskClaimDone` with auditable evidence, UAT hints, and explicit failure-mode analysis. A fresh judge then accepts or rejects the claim. Accepted review completes the task; rejected review leaves it open with suggestions.
 
-Tasks can also carry a separate fresh-perspective robot review from a subagent or other model family. Robot reviews can iterate: if the latest review says the evidence is incomplete or unconvincing, human sign-off is held back until the agent strengthens the evidence and reruns review.
+Humans can use `/lgtm` to view the proof log and sanity-check the reviewer notes later. `/lgtm` is intentionally thin: proof viewing lives there, task management stays in `/tasks`.
 
 ## Install
 
 ```bash
-pi install npm:@wassname2/pi-lgtm
+pi install npm:@wassname2/pi-proof-tasks
 ```
 
 Or for development:
@@ -32,11 +32,11 @@ pi -e ./src/index.ts
 
 ## What is different from pi-tasks
 
-| pi-tasks | pi-lgtm |
+| pi-tasks | pi-proof-tasks |
 |---|---|
-| Agent calls `TaskUpdate { status: "completed" }` | Blocked -- throws error |
-| No evidence required | `lgtm_ask` requires evidence, 2 failure modes, falsification test |
-| Tasks complete immediately | Agent sets `pending_approval`, human runs `/lgtm <id>` |
+| Agent calls `TaskUpdate { status: "completed" }` on any task | Allowed only for subtasks; top-level tasks reject direct completion |
+| No evidence required | `TaskClaimDone` requires evidence, likely/subtle/unknown failures, falsification test, and uncertainty |
+| Tasks complete immediately | Top-level tasks complete only after accepted automatic proof review |
 | No done criterion | `done_criterion` required on create: falsifiable observation |
 
 Stripped: `TaskExecute`, `TaskOutput`, `TaskStop`, `process-tracker.ts`, subagent RPC, settings menu.
@@ -47,85 +47,71 @@ Stripped: `TaskExecute`, `TaskOutput`, `TaskStop`, `process-tracker.ts`, subagen
 ● 3 tasks (1 done, 1 in progress, 1 open)
   ✔ #1 Design schema
   ✳ #2 Implementing cache layer… (2m 49s · ↑ 4.1k ↓ 1.2k)
-  ◻ #3 Load test 🛠 🤖 👀
+  ◻ #3 Load test
 ```
 
-Badges:
-
-- `🛠` tool evidence attached via `lgtm_ask`
-- `🤖` one or more robot review iterations attached
-- `👀` pending human sign-off via `/lgtm`
+Collapsed rows stay simple. Proof details live in `TaskGet` and `/lgtm`, not in the widget row itself.
 
 ## Tools
 
 ### `TaskCreate`
 
 ```
-subject, description, done_criterion (required), progress_label (optional)
+subject, description, done_criterion (required), progress_label (optional), parentId (optional)
 ```
 
-`done_criterion` must be a falsifiable observation: what you expect to see AND what you would see if it is wrong. Example: `"All 92 tests pass. If wrong: type errors in build or failures in task-store.test.ts."`
+Omit `parentId` for a proof-gated top-level goal. Set `parentId` for a directly tickable subtask.
+
+`done_criterion` must be a falsifiable observation: what you expect to see AND what you would see if it is wrong. Example: `"All 125 tests pass. If wrong: type errors in build or failures in task-store.test.ts."`
 
 ### `TaskList`
 
-Lists all tasks. `👀` indicates pending sign-off.
+Lists all tasks in the same compact one-line style as the widget. Proof details live in `TaskGet` and `/lgtm`.
 
 ### `TaskGet`
 
-Full task details including `done_criterion`, approval state, `completion mode`, `review state`, a one-line gate status such as `ready for human sign-off via /lgtm 5` or `blocked: automatic robot review failed: ...`, and evidence-iteration history.
+Full task details including `done_criterion`, task kind, `completion mode`, `review state`, gate status, evidence packet, review iterations, and evidence history.
 
 ### `TaskUpdate`
 
-Update status (`pending | in_progress | deleted`), subject, description, done_criterion, dependencies. Cannot set `completed` -- use `/lgtm`.
+Update status (`pending | in_progress | completed | deleted`), subject, description, done_criterion, dependencies, metadata, or `parentId`.
 
-### `lgtm_ask`
+`status=completed` is allowed for subtasks only. Top-level tasks reject with a message telling the agent to use `TaskClaimDone`.
 
-The epistemic gate. Required fields:
+### `TaskClaimDone`
+
+The epistemic gate for proof and UAT. Required fields:
 
 | Field | Description |
 |---|---|
-| `taskId` | Task to submit |
-| `evidence` | Exact command run + output, commit hash, config/seeds, file paths. "I ran X and got Y" not "I wrote X". |
+| `taskId` | Top-level task to claim done |
+| `evidence` | Exact command output, commit hash, config/seeds, file paths. Verbatim proof, not a summary |
 | `failure_likely` | Most likely way this is wrong despite evidence |
-| `failure_sneaky` | Perverse/silent failure that looks like success superficially |
-| `falsification_test` | What you ran and what you got, so both you and the human can sanity-check it. Why that result could not occur if a failure mode were real. |
-| `verification_hints` | Where to look and what to check. These still force the agent to think, but weak hints are advisory rather than a hard block when the verbatim evidence already proves the claim. Core evidence still has to pass on its own. |
+| `failure_sneaky` | Subtle/silent failure that looks like success superficially |
+| `failure_unknown` | Unknown or untested failure class that could remain |
+| `falsification_test` | What you ran and what you got, with literal output |
+| `evidence_reasoning` | Why this evidence cheaply distinguishes success from the named failures |
+| `verification_hints` | Where to look and what to check, with specific content quoted |
 | `remaining_uncertainty` | What is NOT tested, deferred edge cases, known limitations |
 | `commands` | Optional structured command records: `{ cmd, exit_code, stdout_path?, stderr_path? }` |
 | `evidence_paths` / `falsification_paths` | Optional local artifact paths. Stored as absolute path + sha256 + byte size |
 | `supersede_reason` | Optional reason when this replaces older evidence on the same task |
 
-After calling this, the task shows `👀` and is only completable via `/lgtm <id>`. Evidence is stored on the task so the human can review it hours later without scrolling back. Re-submitting evidence archives the prior package into superseded history instead of silently overwriting it.
+The tool stores a compact canonical proof packet. The automatic reviewer sees that exact packet. Humans later see the same packet via `/lgtm`.
 
-The tool result includes a non-blocking self-check prompt asking whether the evidence directly addresses the `done_criterion` and whether a skeptical reviewer would find it convincing.
-
-`lgtm_ask` always runs the robot-review stage immediately after storing evidence. A robot review that rejects the evidence clears `pending_approval` until the evidence is strengthened and reviewed again. Weak verification hints are advisory if the core verbatim evidence already proves the done criterion. A reviewer crash, auth failure, timeout, or malformed output is recorded as a warning and leaves human sign-off open.
+If the reviewer accepts, the task is completed. If it rejects, the task remains open with missing evidence and suggestions. If the reviewer fails to run, the task still completes and the failure note is stored in the proof log for later inspection.
 
 ### `lgtm_supersede`
 
 Explicitly retire the current evidence package without completing the task.
 
-Use this when the claim changed or the prior evidence is stale. The tool archives the current evidence, current robot reviews, and reviewer-failure context into history with your reason, then closes the human gate until new evidence is submitted.
+Use this when the claim changed or the prior evidence is stale. The tool archives the current evidence, current robot reviews, and reviewer-failure context into history with your reason. Submit a fresh `TaskClaimDone` claim to complete the task.
 
 ### `robot_review_ask`
 
 Attach a fresh-perspective robot review to a task.
 
-Required fields:
-
-| Field | Description |
-|---|---|
-| `taskId` | Task to annotate |
-| `reviewer` | Model/provider/family/class used for the review |
-| `scope` | What the reviewer inspected |
-| `observations` | Concrete observations only. No advice, verdicts, or editorial |
-| `blind_spots` | What the reviewer did not inspect or could not verify |
-| `accepted` | Overall accept/reject decision for whether the task is ready to advance |
-| `evidence_complete` | Whether the supplied evidence actually covers the done criterion |
-| `evidence_convincing` | Whether the supplied evidence would convince a skeptical reviewer |
-| `missing_evidence` | Concrete missing checks or artifacts needed before human sign-off |
-
-Use this from a separate subagent or other model when possible. Reviews append as iterations; the latest one is what gates human sign-off. If stored LGTM evidence already exists, an accepted manual review reopens the human sign-off gate.
+Use this from a separate model/subagent when possible. Reviews append as iterations and are advisory. They do not complete tasks; the automatic gate runs through `TaskClaimDone` or `robot_review_run`.
 
 ### `robot_review_run`
 
@@ -137,29 +123,35 @@ Default reviewer stage:
 pi --mode json -p --no-session --no-tools --no-extensions --model <current-session-model>
 ```
 
-This appends a new robot-review iteration. The reviewer returns an explicit `accepted` boolean as well as detailed observations, blind spots, and missing evidence. If the latest robot review rejects the evidence, `/lgtm` is blocked until stronger evidence is submitted and reviewed again. If the reviewer process fails to run or returns malformed output, the failure is recorded but human sign-off stays open.
+The reviewer deliberately reuses the active session model in a fresh Pi process. That keeps model selection simple and avoids choosing a registry-listed judge model that exists but does not have working auth.
+
+The reviewer returns an explicit `accepted` boolean plus observations, concerns, suggestions, blind spots, missing evidence, and rubric reasons. Rejection keeps the task open. Reviewer infrastructure failure is fail-open: autonomy continues and the failure note is stored in the proof log.
 
 ## Commands
 
-### `/lgtm <id>`
+### `/lgtm`
 
-Human-only sign-off. Shows stored evidence, falsification output, failure modes, review status, and remaining uncertainty in structured sections for review, then asks for confirmation. Without `<id>`, shows a list of pending-approval tasks.
+Proof-log viewer. Use `/lgtm` to pick a task, `/lgtm <id>` to open specific proof logs, and `/lgtm *` to open all open proof logs. It does not complete, delete, or clear tasks.
 
 ### `/tasks`
 
-Interactive menu: view tasks, create task, clear completed/all.
+Interactive task-management menu: view tasks, create task, delete a selected task, clear completed, or clear all.
 
 ## Task lifecycle
 
-```
-pending -> in_progress -> (lgtm_ask)
-                       -> current evidence iteration N
-                       -> robot review iteration(s) on current evidence 🤖
-                       -> pending_approval 👀   if latest robot review passes, or reviewer infra fails
-                       -> reviewer_rejected
-                       -> lgtm_supersede or newer lgtm_ask -> superseded history + fresh current evidence
-                       -> (/lgtm) -> completed
+```text
+Top-level task:
+pending -> in_progress -> TaskClaimDone
+                       -> current evidence iteration N 🛠
+                       -> robot review iteration(s) 🤖
+                       -> completed ✓          if latest robot review accepts
+                       -> remains open         if reviewer rejects
+                       -> completed            if reviewer infrastructure fails (fail-open, note logged)
+                       -> lgtm_supersede or newer TaskClaimDone -> superseded history + fresh current evidence
                        -> deleted
+
+Subtask:
+pending -> in_progress -> TaskUpdate(status=completed) -> completed
 ```
 
 ## Storage
@@ -183,26 +175,37 @@ PI_TASKS_DEBUG=1      # trace to stderr
 
 ## Architecture
 
-```
+```text
 src/
-├── index.ts        # 8 tools + /tasks + /lgtm commands + widget + event handlers
-├── review-badges.ts # Review badge helpers for tool/robot/human lanes
-├── robot-review.ts # Robot review iteration storage + compatibility helpers
-├── types.ts        # Task, TaskStatus types
-├── task-store.ts   # File-backed store with CRUD, locking, complete() method
-├── auto-clear.ts   # Turn-based auto-clearing of completed tasks
-├── tasks-config.ts # Config persistence -> .pi/tasks-config.json
+├── index.ts          # tools + /tasks + /lgtm evidence viewer + widget + event handlers
+├── review-badges.ts # Review badge helpers for evidence/review/completion lanes
+├── robot-review.ts  # Robot review iteration storage + compatibility helpers
+├── types.ts         # Task, TaskStatus types
+├── task-store.ts    # File-backed store with CRUD, locking, complete() method
+├── auto-clear.ts    # Turn-based auto-clearing of completed tasks
+├── tasks-config.ts  # Config persistence -> .pi/tasks-config.json
 └── ui/
-    └── task-widget.ts  # Widget with status icons, spinner, 👀 indicator
+    └── task-widget.ts  # Widget with status icons and spinner
 ```
 
-## Development
+## UI split
+
+- `/tasks` is the management surface.
+- `/lgtm` is the proof-log viewer.
+- `TaskClaimDone` is the completion gate for top-level tasks.
+
+That split is deliberate. It keeps proof inspection separate from task mutation and stays closer to the simpler pre-fork task UI.
+
+## UAT and development
+
+The intended proof mix is one end-to-end functional test, one live UAT in the extension itself, and only a few targeted unit tests for invariants.
 
 ```bash
 npm install
 npm run typecheck
-npm test            # 92 tests
+npm test
 npm run build
+npm run lint
 ```
 
 ## License

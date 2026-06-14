@@ -92,7 +92,6 @@ describe("TaskWidget", () => {
 
   it("renders completed tasks with ✔ icon and strikethrough", () => {
     store.create("Done task", "Desc", "done");
-    store.update("1", { pending_approval: true });
     store.complete("1");
     widget.update();
 
@@ -105,7 +104,6 @@ describe("TaskWidget", () => {
     store.create("Done task", "Desc", "done");
     store.update("1", {
       metadata: { robot_review_observations: ["Observed output drift on seed 2"] },
-      pending_approval: true,
     });
     store.complete("1");
     widget.update();
@@ -143,7 +141,6 @@ describe("TaskWidget", () => {
     store.create("Blocker", "Desc", "done");
     store.create("Blocked", "Desc", "done");
     store.update("2", { add_blocked_by: ["1"] });
-    store.update("1", { pending_approval: true });
     store.complete("1");
     widget.update();
 
@@ -156,7 +153,6 @@ describe("TaskWidget", () => {
     store.create("Task A", "Desc", "done");
     store.create("Task B", "Desc", "done");
     store.create("Task C", "Desc", "done");
-    store.update("1", { pending_approval: true });
     store.complete("1");
     store.update("2", { status: "in_progress" });
     widget.update();
@@ -226,7 +222,6 @@ describe("TaskWidget", () => {
     widget.setActiveTask("1", true);
 
     // Complete the task externally
-    store.update("1", { pending_approval: true });
     store.complete("1");
     widget.update();
 

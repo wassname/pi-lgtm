@@ -125,12 +125,11 @@ export class TaskWidget {
 
     if (tasks.length === 0) return [];
 
-    const counts = { completed: 0, awaiting_signoff: 0, in_progress: 0, pending: 0 };
+    const counts = { completed: 0, in_progress: 0, pending: 0 };
     for (const t of tasks) counts[getDisplayStatus(t)]++;
 
     const parts: string[] = [];
     if (counts.completed > 0) parts.push(`${counts.completed} done`);
-    if (counts.awaiting_signoff > 0) parts.push(`${counts.awaiting_signoff} awaiting sign-off`);
     if (counts.in_progress > 0) parts.push(`${counts.in_progress} in progress`);
     if (counts.pending > 0) parts.push(`${counts.pending} open`);
     const statusText = `${tasks.length} tasks (${parts.join(", ")})`;
@@ -144,7 +143,7 @@ export class TaskWidget {
       const isActive = this.activeTaskIds.has(task.id) && task.status === "in_progress";
       const reviewSuffix = ` ${getReviewBadges(task)}`;
       const tag = getStateTag(task);
-      // [READY  ] [ACTIVE ] [PENDING] [DONE   ] — pad so columns line up.
+      // [ACTIVE ] [PENDING] [DONE   ] — pad so columns line up.
       const tagColour = getStateTagColor(tag);
       const tagBox = `[${tag.padEnd(7)}]`;
       const tagPrefix = (tagColour ? theme.fg(tagColour, tagBox) : tagBox) + " ";

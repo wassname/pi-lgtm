@@ -1,25 +1,26 @@
 /**
- * pi-lgtm — Task tracking with structured human sign-off for pi coding agent.
+ * pi-proof-tasks — Hermes-style evidence + judge task list for pi coding agent.
  *
  * Two-tier model:
- *   - Tasks: agent self-manages. Trivial bookkeeping completes via TaskUpdate.
- *   - LGTMs: significant claims. lgtm_ask submits evidence, robot review gates,
- *     human /lgtm completes.
+ *   - Subtasks: agent self-manages. Checklist work completes via TaskUpdate.
+ *   - Top-level tasks: goals. TaskClaimDone submits a compact proof/UAT packet,
+ *     a fresh judge gives an independent perspective, and explicit rejection keeps
+ *     the task open for a stronger retry.
  *
  * Tools:
  *   TaskCreate       — Create a task with done_criterion
  *   TaskList         — List tasks grouped by status
  *   TaskGet          — Get full task details
- *   TaskUpdate       — Update task fields/status (gated for tasks with lgtm evidence)
- *   lgtm_ask         — Present evidence + failure modes for human sign-off
+ *   TaskUpdate       — Update task fields/status (gated for top-level proof goals)
+ *   TaskClaimDone    — Present evidence + failure modes for proof review
  *   robot_review_ask — Attach observational review from a fresh-perspective agent
  *   robot_review_run — Re-run the automatic robot reviewer
  *
  * Commands:
  *   /tasks            — Interactive task management menu
- *   /lgtm <id...>     — Human signs off on one or more tasks (override allowed even without lgtm_ask)
- *   /lgtm *           — Sign off ALL open tasks (READY/ACTIVE/PENDING) after a grouped confirm
- *   /lgtm             — Pick from any open task (with [READY]/[ACTIVE]/[PENDING] tags)
+ *   /lgtm <id...>     — View the proof log for one or more tasks
+ *   /lgtm *           — View all open task proof logs
+ *   /lgtm             — Pick from open tasks to inspect proof logs
  */
 
 import { spawn } from "node:child_process";
@@ -44,10 +45,9 @@ import {
   appendRobotReviewMetadata,
   getLatestRobotReview,
   getRobotReviews,
-  latestRobotReviewPasses,
   type RobotReviewRecord,
   relaxAdvisoryVerificationHints,
-  shouldOpenHumanSignoffGate,
+  shouldCompleteAfterAcceptedReview,
 } from "./robot-review.js";
 import { TaskStore } from "./task-store.js";
 import { loadTasksConfig } from "./tasks-config.js";
@@ -58,7 +58,7 @@ function textResult(msg: string) {
   return { content: [{ type: "text" as const, text: msg }], details: undefined as any };
 }
 
-const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "lgtm_ask", "lgtm_supersede", "robot_review_ask", "robot_review_run"]);
+const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "TaskClaimDone", "lgtm_supersede", "robot_review_ask", "robot_review_run"]);
 const REMINDER_INTERVAL = 4;
 const AUTO_CLEAR_DELAY = 4;
 export const DEFAULT_ROBOT_REVIEW_TIMEOUT_MS = 120_000;
@@ -69,12 +69,12 @@ export function getPiInvocation(
   args: string[],
   env: NodeJS.ProcessEnv = process.env,
 ): { command: string; args: string[] } {
-  const configured = env.PI_LGTM_PI_BIN?.trim();
+  const configured = env.PI_PROOF_TASKS_PI_BIN?.trim();
   return { command: configured || "pi", args };
 }
 
 export function getRobotReviewTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
-  const configured = Number.parseInt(env.PI_LGTM_ROBOT_REVIEW_TIMEOUT_MS ?? "", 10);
+  const configured = Number.parseInt(env.PI_PROOF_TASKS_ROBOT_REVIEW_TIMEOUT_MS ?? "", 10);
   return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_ROBOT_REVIEW_TIMEOUT_MS;
 }
 
@@ -246,7 +246,9 @@ interface EvidenceIterationRecord {
   evidence: string;
   failure_likely: string;
   failure_sneaky: string;
+  failure_unknown: string;
   falsification_test: string;
+  evidence_reasoning: string;
   verification_hints: string[];
   remaining_uncertainty: string;
   commands: EvidenceCommandRecord[];
@@ -267,6 +269,8 @@ const ROBOT_REVIEW_KEYS = [
   "robot_review_reviewer",
   "robot_review_scope",
   "robot_review_observations",
+  "robot_review_concerns",
+  "robot_review_suggestions",
   "robot_review_blind_spots",
   "robot_review_accepted",
   "robot_review_evidence_complete",
@@ -283,7 +287,9 @@ const CURRENT_EVIDENCE_KEYS = [
   "lgtm_evidence",
   "lgtm_failure_likely",
   "lgtm_failure_sneaky",
+  "lgtm_failure_unknown",
   "lgtm_falsification_test",
+  "lgtm_evidence_reasoning",
   "lgtm_verification_hints",
   "lgtm_remaining_uncertainty",
   "lgtm_submitted_at",
@@ -291,6 +297,26 @@ const CURRENT_EVIDENCE_KEYS = [
   "lgtm_evidence_artifacts",
   "lgtm_falsification_artifacts",
 ] as const;
+
+const RESERVED_METADATA_PREFIXES = ["lgtm_", "robot_review"];
+
+function assertNoReservedMetadata(metadata: Record<string, any> | undefined): string | null {
+  if (!metadata) return null;
+  for (const key of Object.keys(metadata)) {
+    if (RESERVED_METADATA_PREFIXES.some(prefix => key.startsWith(prefix))) {
+      return `Metadata key ${key} is reserved for proof/review internals. Use TaskClaimDone or robot_review_run instead.`;
+    }
+  }
+  return null;
+}
+
+function requiredTextError(fields: Record<string, unknown>, names: string[]): string | null {
+  for (const name of names) {
+    const value = fields[name];
+    if (typeof value !== "string" || value.trim().length === 0) return `${name} is required and cannot be blank.`;
+  }
+  return null;
+}
 
 function nullRecord(keys: readonly string[]): Record<string, null> {
   return Object.fromEntries(keys.map((key) => [key, null]));
@@ -370,7 +396,9 @@ export function getCurrentEvidenceIteration(task: Task): EvidenceIterationRecord
     evidence: metadata.lgtm_evidence,
     failure_likely: typeof metadata.lgtm_failure_likely === "string" ? metadata.lgtm_failure_likely : "",
     failure_sneaky: typeof metadata.lgtm_failure_sneaky === "string" ? metadata.lgtm_failure_sneaky : "",
+    failure_unknown: typeof metadata.lgtm_failure_unknown === "string" ? metadata.lgtm_failure_unknown : "",
     falsification_test: typeof metadata.lgtm_falsification_test === "string" ? metadata.lgtm_falsification_test : "",
+    evidence_reasoning: typeof metadata.lgtm_evidence_reasoning === "string" ? metadata.lgtm_evidence_reasoning : "",
     verification_hints: Array.isArray(metadata.lgtm_verification_hints) ? metadata.lgtm_verification_hints.filter((hint: unknown): hint is string => typeof hint === "string") : [],
     remaining_uncertainty: typeof metadata.lgtm_remaining_uncertainty === "string" ? metadata.lgtm_remaining_uncertainty : "",
     commands: normalizeCommandRecords(metadata.lgtm_commands),
@@ -409,52 +437,131 @@ function formatReviewTextBlock(title: string, body: string): string {
   return `### ${title}\n\n\`\`\`text\n${body}\n\`\`\``;
 }
 
+function presentOrMissing(value: string | undefined): string {
+  return value && value.trim().length > 0 ? value : "(missing)";
+}
+
+function formatBulletList(title: string, items: string[], empty = "(none)"): string {
+  return `### ${title}\n${items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : `- ${empty}`}`;
+}
+
 function formatCommandRecords(commands: EvidenceCommandRecord[]): string | undefined {
   if (commands.length === 0) return undefined;
-  return `### Commands\n${commands.map((command, index) => {
-    const parts = [
-      `${index + 1}. \`${command.cmd}\``,
-      `exit=${command.exit_code}`,
-    ];
-    if (command.stdout_path) parts.push(`stdout=${command.stdout_path}`);
-    if (command.stderr_path) parts.push(`stderr=${command.stderr_path}`);
-    return `- ${parts.join(" | ")}`;
-  }).join("\n")}`;
+  return `### Commands\n${commands.map((command) => `- \`${command.cmd}\` (exit ${command.exit_code})${command.stdout_path ? ` stdout: ${command.stdout_path}` : ""}${command.stderr_path ? ` stderr: ${command.stderr_path}` : ""}`).join("\n")}`;
 }
 
 function formatArtifactRecords(title: string, artifacts: EvidenceArtifactRecord[]): string | undefined {
   if (artifacts.length === 0) return undefined;
-  return `### ${title}\n${artifacts.map((artifact) => `- ${artifact.path} | sha256=${artifact.sha256} | bytes=${artifact.bytes}`).join("\n")}`;
+  return `### ${title}\n${artifacts.map((artifact) => `- ${artifact.path} (${artifact.bytes} bytes, sha256 ${artifact.sha256})`).join("\n")}`;
 }
 
-function formatEvidencePackage(task: Task): string[] {
+function renderPlannedEvidence(entry: EvidenceIterationRecord): string {
+  return [
+    "## Planned evidence / UAT",
+    formatBulletList("Verification hints", entry.verification_hints, "(missing)"),
+    formatReviewTextBlock("Falsification test", presentOrMissing(entry.falsification_test)),
+  ].join("\n\n");
+}
+
+function summarizeJudgement(entry: EvidenceIterationRecord): { title: string; body: string; suggestions: string[] } {
+  const latestReview = entry.robot_reviews[entry.robot_reviews.length - 1];
+  if (latestReview) {
+    const judgement = latestReview.accepted ? "Accepted" : "Refused";
+    const concerns = [
+      ...latestReview.observations,
+      ...latestReview.concerns,
+      ...latestReview.missing_evidence.map((item) => `Missing evidence: ${item}`),
+    ];
+    const suggestions = latestReview.suggestions.length > 0
+      ? latestReview.suggestions
+      : latestReview.accepted
+        ? []
+        : latestReview.missing_evidence.map((item) => `Strengthen the proof for: ${item}`);
+    return {
+      title: judgement,
+      body: `${judgement} by ${latestReview.reviewer} on ${latestReview.submitted_at}.`,
+      suggestions: [...concerns, ...suggestions],
+    };
+  }
+  if (entry.automatic_review_failure) {
+    return {
+      title: "Reviewer unavailable",
+      body: entry.automatic_review_failure.message,
+      suggestions: [
+        "Autonomy continued without blocking completion.",
+        "Inspect the reviewer failure note if you want a fresh external perspective later.",
+      ],
+    };
+  }
+  return {
+    title: "Pending review",
+    body: "No judge result recorded yet.",
+    suggestions: [],
+  };
+}
+
+function renderAttempt(entry: EvidenceIterationRecord): string {
+  const judgement = summarizeJudgement(entry);
+  return [
+    `## Attempt ${entry.iteration}`,
+    formatReviewTextBlock("Submitted evidence", presentOrMissing(entry.evidence)),
+    `### Judgement\n${judgement.title}\n\n${judgement.body}`,
+    formatBulletList("Suggestions / concerns", judgement.suggestions, "(none)"),
+  ].join("\n\n");
+}
+
+export function renderEvidencePacket(task: Task): string {
   const current = getCurrentEvidenceIteration(task);
-  const sections: string[] = [];
+  if (!current) return "(No current proof claim. The agent never called TaskClaimDone, or the prior claim was superseded.)";
+
+  return [
+    "## Goal",
+    `Task #${task.id}: ${task.subject}`,
+    presentOrMissing(task.done_criterion),
+    renderPlannedEvidence(current),
+    renderAttempt(current),
+    formatBulletList("Failure modes", [
+      `Likely: ${presentOrMissing(current.failure_likely)}`,
+      `Sneaky: ${presentOrMissing(current.failure_sneaky)}`,
+      `Unknown: ${presentOrMissing(current.failure_unknown)}`,
+    ]),
+    formatReviewTextBlock("Why this proves success", presentOrMissing(current.evidence_reasoning)),
+    formatReviewTextBlock("Remaining uncertainty", presentOrMissing(current.remaining_uncertainty)),
+    formatCommandRecords(current.commands),
+    formatArtifactRecords("Evidence artifacts", current.evidence_artifacts),
+    formatArtifactRecords("Falsification artifacts", current.falsification_artifacts),
+  ].filter((section): section is string => typeof section === "string" && section.length > 0).join("\n\n");
+}
+
+function renderAutomaticReviewFailure(task: Task): string | undefined {
+  if (typeof task.metadata?.robot_review_last_error !== "string") return undefined;
+  const sections = [`### Automatic robot review failure\n${task.metadata.robot_review_last_error}`];
+  if (typeof task.metadata?.robot_review_last_error_output === "string" && task.metadata.robot_review_last_error_output.trim()) {
+    sections.push(formatReviewTextBlock("Reviewer raw output", task.metadata.robot_review_last_error_output));
+  }
+  return sections.join("\n\n");
+}
+
+export function renderProofLog(task: Task): string {
+  const history = getEvidenceHistory(task);
+  const attempts = history.map(renderAttempt);
+  const current = getCurrentEvidenceIteration(task);
+  const lines = [
+    `# Task #${task.id}: ${task.subject}`,
+    `Status: ${task.status}`,
+    `Gate status: ${getGateStatus(task)}`,
+    "",
+    "## Goal",
+    presentOrMissing(task.done_criterion),
+  ];
   if (current) {
-    sections.push(`Evidence iteration: ${current.iteration} of ${getEvidenceIterationCount(task)}`);
-    sections.push(formatReviewTextBlock("Evidence", current.evidence));
-    if (current.failure_likely) sections.push(`### Failure (likely)\n${current.failure_likely}`);
-    if (current.failure_sneaky) sections.push(`### Failure (sneaky)\n${current.failure_sneaky}`);
-    if (current.falsification_test) sections.push(formatReviewTextBlock("Falsification test", current.falsification_test));
-    const commands = formatCommandRecords(current.commands);
-    if (commands) sections.push(commands);
-    const evidenceArtifacts = formatArtifactRecords("Evidence artifacts", current.evidence_artifacts);
-    if (evidenceArtifacts) sections.push(evidenceArtifacts);
-    const falsificationArtifacts = formatArtifactRecords("Falsification artifacts", current.falsification_artifacts);
-    if (falsificationArtifacts) sections.push(falsificationArtifacts);
-    if (current.verification_hints.length > 0) {
-      sections.push(`### Verification hints\n${current.verification_hints.map((hint) => `- ${hint}`).join("\n")}`);
-    }
-    if (current.remaining_uncertainty) sections.push(`### Remaining uncertainty\n${current.remaining_uncertainty}`);
-    sections.push(`Submitted: ${current.submitted_at}`);
+    lines.push("", renderPlannedEvidence(current), "", ...attempts, renderAttempt(current));
+  } else if (attempts.length > 0) {
+    lines.push("", ...attempts);
+  } else {
+    lines.push("", "(No current proof claim.)");
   }
-  if (typeof task.metadata?.robot_review_last_error === "string") {
-    sections.push(`### Automatic robot review failure\n${task.metadata.robot_review_last_error}`);
-    if (typeof task.metadata?.robot_review_last_error_output === "string" && task.metadata.robot_review_last_error_output.trim()) {
-      sections.push(formatReviewTextBlock("Reviewer raw output", task.metadata.robot_review_last_error_output));
-    }
-  }
-  return sections;
+  return lines.join("\n");
 }
 
 function getNonReviewMetadata(task: Task): Record<string, unknown> {
@@ -510,66 +617,56 @@ function formatRobotReview(review: RobotReviewRecord): string {
     parts.push(`Rubric:\n${rubricLines.join("\n")}`);
   }
   parts.push(
-    `**Accepted: ${review.accepted ? "yes" : "no"}**`,
-    `**Evidence complete: ${review.evidence_complete ? "yes" : "no"}**`,
-    `**Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}**`,
+    `Accepted: ${review.accepted ? "yes" : "no"}`,
+    `Evidence complete: ${review.evidence_complete ? "yes" : "no"}`,
+    `Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}`,
     `Observations:\n- ${review.observations.join("\n- ")}`,
   );
+  if (review.concerns.length > 0) parts.push(`Concerns:\n- ${review.concerns.join("\n- ")}`);
+  if (review.suggestions.length > 0) parts.push(`Suggestions:\n- ${review.suggestions.join("\n- ")}`);
   if (review.missing_evidence.length > 0) parts.push(`Missing evidence:\n- ${review.missing_evidence.join("\n- ")}`);
   if (review.blind_spots) parts.push(`Blind spots: ${review.blind_spots}`);
   return parts.join("\n");
 }
 
-function buildRobotReviewPrompt(task: any): string {
-  const priorReviews = getRobotReviews(task);
-  const priorSection = priorReviews.length > 0
-    ? `\nPrevious robot reviews:\n${priorReviews.map(formatRobotReview).join("\n\n")}\n`
-    : "\nPrevious robot reviews:\n(none)\n";
+export function buildRobotReviewPrompt(task: Task): string {
   return [
-    "You are a VALIDATION reviewer, not a flaw-finder. Your job is to sanity-check that the evidence addresses the done criterion.",
-    "Your role: validate and sanity-check. Comment and suggest, but the gate is only the rubric below.",
+    "You are a fresh validation judge for a Hermes-style proof log.",
+    "Question: in retrospect, does this evidence prove success for the stated goal?",
+    "If not, say no and explain what the agent should do next. Suggestions are advisory guidance, not a separate gate.",
     "",
     "## Critical: Evidence must be verbatim",
     "",
-    "Evidence should contain literal output — verbatim command output, exact log lines, markdown block quotes, table rows, URLs — not summaries or interpretations. If the evidence only says 'it worked' or 'returned 5 results' without showing the actual output, flag it under evidence_covers_done_criterion or falsification_test_runnable, not verification_hints_actionable.",
-    "A human must be able to verify the claim from the evidence alone, without re-running anything. Summaries are not evidence. Literal output is evidence.",
+    "Evidence should contain literal output, exact log lines, markdown block quotes, table rows, and URLs, not summaries or interpretations.",
+    "A human must be able to inspect the evidence alone without re-running anything.",
     "",
     "## Rubric (rate each item pass/fail)",
     "",
-    "1. evidence_covers_done_criterion: Does the evidence directly address the stated done criterion? Evidence must be verbatim (literal output, not 'it worked').",
-    "2. falsification_test_runnable: Is the falsification test concrete enough that someone could run it and get a yes/no result? Must include actual output, not just 'ran X and it worked'.",
-    "3. failure_modes_addressed: Are the failure_likely and failure_sneaky plausibly the top failure modes? (Not: are there OTHER failure modes?)",
-    "4. verification_hints_actionable: Can a human follow the verification hints to check the claim without re-running experiments? Hints should reference specific content (line ranges, output snippets, URLs), not bare paths or counts.",
+    "1. evidence_covers_done_criterion: Does the evidence directly address the stated done criterion?",
+    "2. falsification_test_runnable: Is the falsification test concrete enough that someone could run it and get a yes/no result?",
+    "3. failure_modes_addressed: Are the likely, sneaky, and unknown failure modes plausible enough to guide evidence choice?",
+    "4. evidence_distinguishes_success: Does the agent explain why the evidence distinguishes success from those failure modes?",
+    "5. verification_hints_actionable: Can a human follow the verification hints to inspect the claim without re-running experiments?",
     "",
     "Set evidence_complete=true only if items 1 and 2 pass.",
     "Set evidence_convincing=true only if items 1 and 2 pass. Item 4 is advisory unless it reveals that items 1 or 2 were overstated.",
-    "Set accepted=true only if items 1, 2, and 3 pass. Do not reject solely because verification hints are weak if the verbatim evidence already proves the done criterion.",
+    "Set accepted=true only if items 1, 2, 3, and 4 pass. Do not reject solely because verification hints are weak if the verbatim evidence already proves the done criterion.",
     "",
-    "Observations: report what you see, not what might be missing. Comments and suggestions go in observations.",
+    "observations: what you saw in the packet.",
+    "concerns: concise reasons the current evidence may not prove success yet.",
+    "suggestions: what the agent should do next if the evidence is not yet enough. Nonblocking guidance only.",
     "missing_evidence: ONLY items from the rubric that failed. Do NOT add new dimensions.",
     "",
     "Return exactly one JSON object between the markers ROBOT_REVIEW_JSON_START and ROBOT_REVIEW_JSON_END.",
-    "JSON schema (reasoning before booleans — think first, then judge):",
-    '{"reviewer":"string","scope":"string","rubric":{"evidence_covers_done_criterion":{"reason":"...","pass":true},"falsification_test_runnable":{"reason":"...","pass":true},"failure_modes_addressed":{"reason":"...","pass":true},"verification_hints_actionable":{"reason":"...","pass":true}},"observations":["string"],"blind_spots":"string","missing_evidence":["string"],"evidence_complete":true,"evidence_convincing":true,"accepted":true}',
+    "JSON schema:",
+    '{"reviewer":"string","scope":"string","rubric":{"evidence_covers_done_criterion":{"reason":"...","pass":true},"falsification_test_runnable":{"reason":"...","pass":true},"failure_modes_addressed":{"reason":"...","pass":true},"evidence_distinguishes_success":{"reason":"...","pass":true},"verification_hints_actionable":{"reason":"...","pass":true}},"observations":["string"],"concerns":["string"],"suggestions":["string"],"blind_spots":"string","missing_evidence":["string"],"evidence_complete":true,"evidence_convincing":true,"accepted":true}',
     "",
-    `Task #${task.id}: ${task.subject}`,
-    `Done criterion: ${task.done_criterion}`,
-    `Description: ${task.description}`,
+    "You are reviewing exactly the same proof packet shown by TaskGet and /lgtm. Do not assume hidden context beyond this packet.",
     "",
-    "Evidence package:",
-    `Evidence: ${task.metadata?.lgtm_evidence ?? "(missing)"}`,
-    `Failure likely: ${task.metadata?.lgtm_failure_likely ?? "(missing)"}`,
-    `Failure sneaky: ${task.metadata?.lgtm_failure_sneaky ?? "(missing)"}`,
-    `Falsification test: ${task.metadata?.lgtm_falsification_test ?? "(missing)"}`,
-    `Verification hints: ${Array.isArray(task.metadata?.lgtm_verification_hints) ? task.metadata.lgtm_verification_hints.join(" | ") : "(missing)"}`,
-    `Remaining uncertainty: ${task.metadata?.lgtm_remaining_uncertainty ?? "(missing)"}`,
-    `Commands: ${JSON.stringify(normalizeCommandRecords(task.metadata?.lgtm_commands))}`,
-    `Evidence artifacts: ${JSON.stringify(normalizeArtifactRecords(task.metadata?.lgtm_evidence_artifacts))}`,
-    `Falsification artifacts: ${JSON.stringify(normalizeArtifactRecords(task.metadata?.lgtm_falsification_artifacts))}`,
-    priorSection,
+    renderEvidencePacket(task),
     "Output format:",
     "ROBOT_REVIEW_JSON_START",
-    '{"reviewer":"...","scope":"...","rubric":{...},"observations":["..."],"blind_spots":"...","missing_evidence":["..."],"evidence_complete":true,"evidence_convincing":true,"accepted":true}',
+    '{"reviewer":"...","scope":"...","rubric":{...},"observations":["..."],"concerns":["..."],"suggestions":["..."],"blind_spots":"...","missing_evidence":["..."],"evidence_complete":true,"evidence_convincing":true,"accepted":true}',
     "ROBOT_REVIEW_JSON_END",
   ].join("\n");
 }
@@ -583,6 +680,8 @@ async function runAutomaticRobotReview(
     throw new Error("Automatic robot review requires an active current session model.");
   }
   const prompt = buildRobotReviewPrompt(task);
+  // Keep reviewer model selection simple: reuse the active session model in a fresh Pi process.
+  // This avoids picking a registry-listed judge model that exists but lacks working auth.
   const args = ["--mode", "json", "-p", "--no-session", "--no-tools", "--no-extensions", "--model", currentModelRef];
   args.push(prompt);
   const invocation = getPiInvocation(args);
@@ -608,6 +707,8 @@ async function runAutomaticRobotReview(
     error.rawOutput = result.stdout.trim();
     throw error;
   }
+  const concerns = Array.isArray(parsed.concerns) ? parsed.concerns.filter((item): item is string => typeof item === "string") : [];
+  const suggestions = Array.isArray(parsed.suggestions) ? parsed.suggestions.filter((item): item is string => typeof item === "string") : [];
   const rawMissing: string[] = Array.isArray(parsed.missing_evidence)
     ? parsed.missing_evidence.filter((item): item is string => typeof item === "string")
     : [];
@@ -628,6 +729,8 @@ async function runAutomaticRobotReview(
     reviewer: typeof parsed.reviewer === "string" ? parsed.reviewer : commandLabel,
     scope: typeof parsed.scope === "string" ? parsed.scope : "task evidence package",
     observations,
+    concerns,
+    suggestions,
     blind_spots: typeof parsed.blind_spots === "string" ? parsed.blind_spots : "not stated",
     accepted: typeof parsed.accepted === "boolean"
       ? parsed.accepted
@@ -649,8 +752,8 @@ async function runAutomaticRobotReview(
 const SYSTEM_REMINDER = `<system-reminder>
 Task tools haven't been used recently. Check the task list and keep it accurate:
 - Mark tasks in_progress when you start them (TaskUpdate status=in_progress).
-- Complete trivial subtasks directly: TaskUpdate(status=completed). Drop irrelevant ones with status=deleted.
-- For significant claims with uncertainty (a feature, an experiment result, run-until-X), call lgtm_ask with evidence — that triggers robot review and a human /lgtm gate.
+- Complete subtasks directly: TaskUpdate(status=completed). Drop irrelevant ones with status=deleted.
+- Complete top-level tasks with TaskClaimDone: include verbatim evidence, likely/subtle/unknown failure modes, falsification test, and remaining uncertainty. Explicit rejection keeps the task open; reviewer infrastructure failures are logged but do not block autonomy.
 A stale list is worse than no list. Ignore this reminder if not applicable. Never mention it to the user.
 </system-reminder>`;
 
@@ -753,13 +856,13 @@ export default function (pi: ExtensionAPI) {
       const missing = latest.missing_evidence.length > 0
         ? ` Missing evidence: ${latest.missing_evidence.join("; ")}.`
         : "";
-      return `- Task #${task.id} ${task.subject}: latest robot review rejected the evidence.${missing} Strengthen the evidence, call lgtm_ask again, then rerun robot_review_run before asking for human sign-off.`;
+      return `- Task #${task.id} ${task.subject}: latest proof review rejected the evidence.${missing} Strengthen the evidence and call TaskClaimDone again.`;
     }).join("\n");
 
     return {
       systemPrompt:
         event.systemPrompt +
-        `\n\n<system-reminder>\nLatest robot review follow-up required:\n${reminder}\nDo not ask for human sign-off until the latest robot review accepts the evidence.\n</system-reminder>\n`,
+        `\n\n<system-reminder>\nLatest proof review follow-up required:\n${reminder}\nDo not complete the top-level task until the latest proof review accepts the evidence.\n</system-reminder>\n`,
     };
   });
 
@@ -788,18 +891,19 @@ export default function (pi: ExtensionAPI) {
 
 ## Two tiers
 
-- **Tasks**: agent-managed. Trivial bookkeeping (e.g. "monitor pueue 30") can be completed directly via TaskUpdate(status=completed). Subtasks lead up to verification.
-- **LGTMs**: for significant claims with uncertainty (implement a feature, run-until-X). Call lgtm_ask with evidence — that triggers robot review and routes completion through /lgtm.
+- **Top-level tasks**: goals with proof. They cannot be completed directly; call TaskClaimDone with evidence and failure modes.
+- **Subtasks**: agent-managed checklist items under a top-level task. They can be completed directly via TaskUpdate(status=completed).
 
 ## Task Fields
 
 - **subject**: Brief actionable title
 - **description**: Detailed description with context
 - **done_criterion**: REQUIRED. Falsifiable observation that distinguishes done from fail/null/incomplete/silent-fail. State expected AND wrong-case observations (e.g., "All 92 tests pass. If wrong: type errors in build or test failures in task-store.test.ts")
-- **progress_label** (optional): What the agent is currently doing, shown during in-progress tasks`,
+- **progress_label** (optional): What the agent is currently doing, shown during in-progress tasks
+- **parentId** (optional): Set this to make a directly tickable subtask. Omit it for a proof-gated top-level goal.`,
     promptGuidelines: [
-      "Use TaskCreate for complex tasks. Include a specific done_criterion.",
-      "Mark tasks in_progress before starting. Complete trivial tasks via TaskUpdate; call lgtm_ask for significant claims, then human /lgtm.",
+      "Use TaskCreate for complex top-level goals. Include a specific done_criterion.",
+      "Mark tasks in_progress before starting. Complete subtasks via TaskUpdate; complete top-level tasks via TaskClaimDone with proof evidence.",
     ],
     parameters: Type.Object({
       subject: Type.String({ description: "Brief task title" }),
@@ -807,11 +911,19 @@ export default function (pi: ExtensionAPI) {
       done_criterion: Type.String({ description: "Falsifiable observation that distinguishes DONE from fail, null result, incomplete, or silent failure. State what you expect to see AND what you'd see if it's wrong." }),
       progress_label: Type.Optional(Type.String({ description: "What the agent is currently doing, shown during in-progress tasks" })),
       metadata: Type.Optional(Type.Record(Type.String(), Type.Any())),
+      parentId: Type.Optional(Type.String({ description: "Parent task ID. If set, this task is a directly tickable subtask; if omitted, this is a proof-gated top-level goal." })),
     }),
 
     execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const metadataError = assertNoReservedMetadata(params.metadata);
+      if (metadataError) return Promise.resolve(textResult(metadataError));
       autoClear.resetBatchCountdown();
-      const task = store.create(params.subject, params.description, params.done_criterion, params.progress_label, params.metadata);
+      let task: Task;
+      try {
+        task = store.create(params.subject, params.description, params.done_criterion, params.progress_label, params.metadata, params.parentId);
+      } catch (err: any) {
+        return Promise.resolve(textResult(err.message));
+      }
       widget.update();
       return Promise.resolve(textResult(`Task #${task.id} created: ${task.subject}\nDone criterion: ${task.done_criterion}`));
     },
@@ -824,7 +936,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "TaskList",
     label: "TaskList",
-    description: `List all tasks grouped by status. State tag: [READY] (signoff-ready) [ACTIVE] [PENDING] [DONE]. Pipeline stages: [🛠🤖👀] = evidence→review→signoff (·=pending).`,
+    description: `List all tasks grouped by status. State tag: [ACTIVE] [PENDING] [DONE]. Pipeline stages: [🛠🤖✓] = evidence→review→completed (·=pending).`,
     parameters: Type.Object({}),
 
     execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
@@ -832,7 +944,8 @@ export default function (pi: ExtensionAPI) {
       if (tasks.length === 0) return Promise.resolve(textResult("No tasks found"));
 
       const renderTask = (task: typeof tasks[number]) => {
-        let line = `  [${getStateTag(task).padEnd(7)}] #${task.id} ${task.subject} ${getReviewBadges(task)}`;
+        const parent = task.parentId ? ` [subtask of #${task.parentId}]` : "";
+        let line = `  [${getStateTag(task).padEnd(7)}] #${task.id} ${task.subject}${parent} ${getReviewBadges(task)}`;
         if (task.blockedBy.length > 0) {
           const openBlockers = task.blockedBy.filter(bid => {
             const blocker = store.get(bid);
@@ -845,7 +958,6 @@ export default function (pi: ExtensionAPI) {
 
       const buckets: { label: string; status: DisplayStatus }[] = [
         { label: "Active", status: "in_progress" },
-        { label: "Awaiting sign-off", status: "awaiting_signoff" },
         { label: "Pending", status: "pending" },
         { label: "Completed", status: "completed" },
       ];
@@ -870,7 +982,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "TaskGet",
     label: "TaskGet",
-    description: `Get full LGTM sign-off task details including done_criterion and approval state.`,
+    description: `Get full proof-gated task details including done_criterion, evidence packet, and reviewer state.`,
     parameters: Type.Object({
       taskId: Type.String({ description: "Task ID to retrieve" }),
     }),
@@ -887,7 +999,7 @@ export default function (pi: ExtensionAPI) {
       const history = getEvidenceHistory(task);
       const lines: string[] = [
         `Task #${task.id}: ${task.subject}`,
-        `Status: ${task.status} ${getReviewBadges(task)}${task.pending_approval && task.status !== "completed" ? " (pending human sign-off)" : ""}`,
+        `Status: ${task.status} ${getReviewBadges(task)}`,
         `Completion mode: ${completionMode}`,
         `Review state: ${reviewState}`,
         `Gate status: ${getGateStatus(task)}`,
@@ -895,13 +1007,17 @@ export default function (pi: ExtensionAPI) {
         `Description: ${desc}`,
       ];
       lines.push(`Evidence iterations: total=${getEvidenceIterationCount(task)}, current=${currentEvidence ? currentEvidence.iteration : 0}, superseded=${history.length}`);
-      lines.push(`Human sign-off pending: ${task.pending_approval ? "yes" : "no"}`);
+      lines.push(`Task kind: ${task.parentId ? `subtask of #${task.parentId}` : "top-level proof goal"}`);
       if (robotReviews.length > 0) {
         const latest = robotReviews[robotReviews.length - 1];
         lines.push(`Robot reviews on current evidence: ${robotReviews.length} (latest: accepted=${latest.accepted ? "yes" : "no"}, complete=${latest.evidence_complete ? "yes" : "no"}, convincing=${latest.evidence_convincing ? "yes" : "no"})`);
       }
-      const evidenceSections = formatEvidencePackage(task);
-      if (evidenceSections.length > 0) lines.push(...evidenceSections);
+      lines.push(renderEvidencePacket(task));
+      const automaticReviewFailure = renderAutomaticReviewFailure(task);
+      if (automaticReviewFailure) lines.push(automaticReviewFailure);
+      if (robotReviews.length > 0) {
+        lines.push(`### Robot reviews\n${robotReviews.map(formatRobotReview).join("\n\n")}`);
+      }
       const historySummary = formatHistorySummary(task);
       if (historySummary) lines.push(historySummary);
       if (task.blockedBy.length > 0) {
@@ -929,8 +1045,8 @@ export default function (pi: ExtensionAPI) {
     description: `Update task fields or status.
 
 Two-tier model:
-- Trivial bookkeeping tasks (e.g. "monitor pueue 30") can be marked completed directly here.
-- Tasks that called lgtm_ask are gated: completion requires /lgtm <id>. Strengthen evidence and re-run lgtm_ask if the robot review rejected it.`,
+- Subtasks can be marked completed directly here.
+- Top-level tasks are proof goals: TaskUpdate(status=completed) is rejected. Use TaskClaimDone so the failure-mode/evidence form and automatic reviewer run.`,
     parameters: Type.Object({
       taskId: Type.String({ description: "Task ID to update" }),
       status: Type.Optional(Type.Unsafe<"pending" | "in_progress" | "completed" | "deleted">({
@@ -938,7 +1054,7 @@ Two-tier model:
           { type: "string", enum: ["pending", "in_progress", "completed"] },
           { type: "string", const: "deleted" },
         ],
-        description: "New status. Setting completed is allowed for trivial tasks; tasks with lgtm evidence must complete via /lgtm.",
+        description: "New status. Setting completed is allowed for subtasks only; top-level tasks must complete via TaskClaimDone.",
       })),
       subject: Type.Optional(Type.String({ description: "Brief task title" })),
       description: Type.Optional(Type.String({ description: "Detailed description" })),
@@ -950,6 +1066,9 @@ Two-tier model:
     }),
 
     execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const metadataError = assertNoReservedMetadata(params.metadata);
+      if (metadataError) return Promise.resolve(textResult(metadataError));
+
       const { taskId, ...fields } = params;
       let task: any, changedFields: string[], warnings: string[];
       try {
@@ -972,7 +1091,7 @@ Two-tier model:
         autoClear.trackCompletion(taskId, currentTurn);
       } else if (fields.status === "deleted") {
         widget.setActiveTask(taskId, false);
-        warnings.push("Task deleted via agent tool. Use /tasks to confirm or undo. Deleting tasks without human sign-off is discouraged — tasks should be completed via /lgtm or explicitly dismissed by the user.");
+        warnings.push("Task deleted via agent tool. Use /tasks to confirm or undo. Deleting tasks should be reserved for dismissed or irrelevant work.");
       }
 
       widget.update();
@@ -983,16 +1102,16 @@ Two-tier model:
   });
 
   // ──────────────────────────────────────────────────
-  // Tool 5: lgtm_ask
+  // Tool 5: TaskClaimDone
   // ──────────────────────────────────────────────────
 
   pi.registerTool({
-    name: "lgtm_ask",
-    label: "lgtm_ask",
-    description: `Present evidence that a task meets its done_criterion and request human sign-off.
+    name: "TaskClaimDone",
+    label: "TaskClaimDone",
+    description: `Claim that a top-level task meets its done_criterion.
 
-Forces structured thinking about failure modes. All text fields required.
-After this, task enters pending sign-off state — only completable via /lgtm <id>.
+Forces structured thinking about failure modes and cheap evidence. All text fields required.
+Accepted automatic review completes the task. Rejected review leaves it open with guidance. Reviewer infrastructure failure is logged but does not block autonomy.
 
 ## CRITICAL: Evidence must be verbatim
 
@@ -1002,19 +1121,23 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
 
 - **evidence**: Verbatim auditable proof — literal output, not summaries
 - **failure_likely**: Most likely way this could be wrong despite evidence
-- **failure_sneaky**: Most perverse or sneaky failure -- one that looks like success superficially, corrupts silently, or only breaks under specific conditions (scale, time, edge case). E.g. feature active but wrong mechanism, works in tests but degrades in prod, correct output for wrong reason.
+- **failure_sneaky**: Subtle/sneaky failure -- one that looks like success superficially, corrupts silently, or only breaks under specific conditions (scale, time, edge case). E.g. feature active but wrong mechanism, works in tests but degrades in prod, correct output for wrong reason.
+- **failure_unknown**: What class of unknown/untested failure could remain even if the evidence is true
 - **falsification_test**: What you ran and the literal output you got, with reasoning why that output disproves the failure mode
+- **evidence_reasoning**: Why this evidence cheaply distinguishes done-criterion success from the likely/subtle/unknown failures
 - **verification_hints**: Where to look and what to check, with specific content quoted (not bare paths or counts)
 - **remaining_uncertainty**: What's NOT tested, known limitations, deferred edge cases
 - **commands**: Optional first-class command records for the evidence package
 - **evidence_paths / falsification_paths**: Optional local artifact paths. The tool stores absolute path, sha256, and byte size for auditability.
 - **supersede_reason**: Optional reason when this submission replaces an older one on the same task`,
     parameters: Type.Object({
-      taskId: Type.String({ description: "Task ID to submit for sign-off" }),
+      taskId: Type.String({ description: "Top-level task ID to claim done" }),
       evidence: Type.String({ description: "Verbatim auditable proof: literal command output, exact log lines, markdown block quotes, table rows, URLs. NOT summaries or interpretations. 'I ran X and got Y' is not evidence -- paste the actual output of X. A human must verify from this alone without re-running. (One short paragraph is fine; verbatim matters more than length.)" }),
       failure_likely: Type.String({ description: "Most likely way this could be wrong despite evidence. One short sentence preferred — pick the top one, not a list." }),
-      failure_sneaky: Type.String({ description: "Most perverse failure: looks like success superficially, corrupts silently, or only breaks at scale/time/edge case. One short sentence preferred." }),
+      failure_sneaky: Type.String({ description: "Subtle/sneaky failure: looks like success superficially, corrupts silently, or only breaks at scale/time/edge case. One short sentence preferred." }),
+      failure_unknown: Type.String({ description: "What unknown or untested failure class could remain even if this evidence is true. One short sentence preferred." }),
       falsification_test: Type.String({ description: "What you ran and the literal output you got. Include verbatim command + output, not 'it worked'. State why that output could not occur if a failure mode were real. Brevity is fine; the verbatim output is what counts." }),
+      evidence_reasoning: Type.String({ description: "Why this evidence cheaply distinguishes done-criterion success from the likely/subtle/unknown failures." }),
       verification_hints: Type.Array(Type.String(), { description: "Where to look, with specific content quoted (not bare paths or counts). E.g. 'src/loss.py:45-60 shows grad_norm=0.001'. One or two short hints is enough." }),
       remaining_uncertainty: Type.String({ description: "What's NOT tested, known limitations, deferred edges. One short sentence preferred. If you can't articulate uncertainty, you haven't thought hard enough." }),
       commands: Type.Optional(Type.Array(Type.Object({
@@ -1035,16 +1158,24 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
 
       // verification_hints are descriptions, not validated file paths
 
+      if (task.parentId) return Promise.resolve(textResult(`Task #${params.taskId} is a subtask. Use TaskUpdate(status=completed) for subtasks; TaskClaimDone is for top-level proof goals.`));
+      const blankField = requiredTextError(params, ["evidence", "failure_likely", "failure_sneaky", "failure_unknown", "falsification_test", "evidence_reasoning", "remaining_uncertainty"]);
+      if (blankField) return Promise.resolve(textResult(blankField));
+      if (!params.verification_hints.some((hint: string) => hint.trim().length > 0)) {
+        return Promise.resolve(textResult("verification_hints must include at least one non-blank hint."));
+      }
+
       store.update(params.taskId, {
-        pending_approval: true,
         metadata: {
-          ...archiveCurrentEvidence(task, params.supersede_reason ?? "replaced by newer lgtm submission"),
+          ...archiveCurrentEvidence(task, params.supersede_reason ?? "replaced by newer proof claim"),
           ...clearCurrentEvidenceMetadata(),
           ...clearRobotReviewMetadata(),
           lgtm_evidence: params.evidence,
           lgtm_failure_likely: params.failure_likely,
           lgtm_failure_sneaky: params.failure_sneaky,
+          lgtm_failure_unknown: params.failure_unknown,
           lgtm_falsification_test: params.falsification_test,
+          lgtm_evidence_reasoning: params.evidence_reasoning,
           lgtm_verification_hints: params.verification_hints,
           lgtm_remaining_uncertainty: params.remaining_uncertainty,
           lgtm_submitted_at: new Date().toISOString(),
@@ -1060,37 +1191,38 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
       try {
         const { review, command } = await runAutomaticRobotReview(refreshedTask, signal, getCurrentModelRef(ctx.model));
         store.update(params.taskId, {
-          pending_approval: shouldOpenHumanSignoffGate(refreshedTask, review.accepted),
           metadata: {
             ...appendRobotReviewMetadata(refreshedTask, review),
             ...clearAutomaticReviewFailureMetadata(),
           },
         });
+        if (shouldCompleteAfterAcceptedReview(store.get(params.taskId) ?? refreshedTask, review.accepted)) {
+          store.complete(params.taskId);
+          autoClear.trackCompletion(params.taskId, currentTurn);
+          widget.setActiveTask(params.taskId, false);
+        }
+        const storedReview = getLatestRobotReview(store.get(params.taskId) ?? refreshedTask);
         robotReviewNote =
           `\n\n### Automatic robot review\n` +
-          `Reviewer: ${command}\n` +
-          `Accepted: ${review.accepted ? "yes" : "no"}\n` +
-          `Evidence complete: ${review.evidence_complete ? "yes" : "no"}\n` +
-          `Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}\n` +
-          (review.rubric
-            ? `Rubric:\n${Object.entries(review.rubric).map(([k, v]) => `- ${v.pass ? "PASS" : "FAIL"} ${k}: ${v.reason}`).join("\n")}\n`
-            : "") +
-          `${review.observations.map(o => `- ${o}`).join("\n")}`;
-        if (review.missing_evidence.length > 0) {
-          robotReviewNote += `\nMissing evidence:\n${review.missing_evidence.map(item => `- ${item}`).join("\n")}`;
-        }
+          `Reviewer command: ${command}\n\n` +
+          `${storedReview ? formatRobotReview(storedReview) : formatRobotReview({ ...review, iteration: 1 })}`;
         if (!review.accepted) {
-          robotReviewNote += `\nResult: human sign-off has been held back until the evidence is strengthened and reviewed again.`;
+          robotReviewNote += `\n\nResult: task remains open until the evidence is strengthened and reviewed again.`;
         }
       } catch (err: any) {
         store.update(params.taskId, {
-          pending_approval: refreshedTask.pending_approval,
           metadata: getAutomaticReviewFailureMetadata(err.message, err.rawOutput),
         });
+        const taskAfterFailure = store.get(params.taskId) ?? refreshedTask;
+        if (!taskAfterFailure.parentId) {
+          store.complete(params.taskId);
+          autoClear.trackCompletion(params.taskId, currentTurn);
+          widget.setActiveTask(params.taskId, false);
+        }
         robotReviewNote =
           `\n\n### Automatic robot review\n` +
-          `Reviewer failed: ${err.message}\n` +
-          `Human sign-off is still allowed because reviewer failures are warnings, not evidence rejections.` +
+          `Reviewer unavailable: ${err.message}\n` +
+          `Autonomy continued without blocking completion.` +
           (typeof err.rawOutput === "string" && err.rawOutput.trim()
             ? `\n\n${formatReviewTextBlock("Reviewer raw output", err.rawOutput.trim())}`
             : "");
@@ -1099,16 +1231,11 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
 
       const updatedTask = store.get(task.id) ?? task;
       const result =
-        `## Task #${task.id}: ${task.subject}\n` +
-        `Done criterion: ${task.done_criterion}\n\n` +
-        `${formatEvidencePackage(updatedTask).join("\n\n")}` +
+        `${renderProofLog(updatedTask)}` +
         robotReviewNote +
         `\n\n---\n` +
         `Gate status: ${getGateStatus(updatedTask)}\n\n` +
-        `**Self-check (non-blocking):** Look at this as the human will see it. ` +
-        `Does the evidence directly address the done_criterion "${task.done_criterion}"? ` +
-        `Would a skeptical reviewer find this convincing, or would they immediately ask ` +
-        `"but what about..."? If evidence feels thin, call lgtm_ask again with stronger evidence.`;
+        `Self-check: if a skeptical reviewer would still ask "but what about...", call TaskClaimDone again with stronger proof.`;
 
       return textResult(result);
     },
@@ -1117,9 +1244,9 @@ Do NOT summarize or interpret. Paste literal command output, exact log lines, ma
   pi.registerTool({
     name: "lgtm_supersede",
     label: "lgtm_supersede",
-    description: `Mark the current LGTM evidence package as superseded without completing the task.
+    description: `Mark the current proof package as superseded without completing the task.
 
-Use this when a prior claim is stale or wrong and reviewers should stop treating it as the current evidence. The current evidence, robot reviews, and reviewer-failure context are archived into history with your reason. Human /lgtm remains the only completion path.`,
+Use this when a prior claim is stale or wrong and reviewers should stop treating it as the current evidence. The current evidence, robot reviews, and reviewer-failure context are archived into history with your reason. Submit a fresh TaskClaimDone claim to complete the task.`,
     parameters: Type.Object({
       taskId: Type.String({ description: "Task ID whose current evidence should be superseded" }),
       reason: Type.String({ description: "Why the current evidence is stale or replaced" }),
@@ -1133,7 +1260,6 @@ Use this when a prior claim is stale or wrong and reviewers should stop treating
       }
 
       store.update(params.taskId, {
-        pending_approval: false,
         metadata: {
           ...archiveCurrentEvidence(task, params.reason),
           ...clearCurrentEvidenceMetadata(),
@@ -1160,23 +1286,24 @@ Use this when a prior claim is stale or wrong and reviewers should stop treating
     description: `Attach fresh-perspective robot review observations to a task.
 
 Use this from a separate subagent or model when possible, ideally from a different model family/class than the implementation agent.
-Your role is VALIDATION, not flaw-finding. Sanity-check that the evidence addresses the done criterion. Comment and suggest, but the gate is only the rubric items.
-Observations only: report what you saw, not advice or editorial. Structured gate fields record whether the evidence is complete and convincing enough to advance.
+Your role is VALIDATION, not flaw-finding. Sanity-check that the evidence addresses the done criterion. Observations, concerns, and suggestions are welcome, but the gate is only the rubric items.
 
-This does not complete the task. Human /lgtm remains the only completion path.`,
+This records an independent review but does not itself complete the task. Use TaskClaimDone or robot_review_run for the automatic completion gate.`,
     parameters: Type.Object({
       taskId: Type.String({ description: "Task ID to attach robot review to" }),
       reviewer: Type.String({ description: "Reviewer identity, model family, or class" }),
       scope: Type.String({ description: "What the reviewer examined" }),
       observations: Type.Array(Type.String(), {
         minItems: 1,
-        description: "Observations only. Concrete things noticed in the artifacts. No recommendations, interpretation, or editorial.",
+        description: "Concrete things noticed in the artifacts.",
       }),
+      concerns: Type.Optional(Type.Array(Type.String(), { description: "Why the current evidence may not yet prove success." })),
+      suggestions: Type.Optional(Type.Array(Type.String(), { description: "What the agent should do next if the evidence is not yet enough." })),
       blind_spots: Type.String({ description: "What the reviewer did not inspect or could not verify" }),
       evidence_complete: Type.Boolean({ description: "Whether the supplied evidence covers the claimed done criterion." }),
       evidence_convincing: Type.Boolean({ description: "Whether the supplied evidence would convince a skeptical reviewer." }),
       accepted: Type.Optional(Type.Boolean({ description: "Overall review decision. Defaults to evidence_complete && evidence_convincing." })),
-      missing_evidence: Type.Optional(Type.Array(Type.String(), { description: "Concrete missing checks, artifacts, or observations needed before human sign-off." })),
+      missing_evidence: Type.Optional(Type.Array(Type.String(), { description: "Concrete missing checks, artifacts, or observations needed before completion." })),
     }),
 
     execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -1186,12 +1313,13 @@ This does not complete the task. Human /lgtm remains the only completion path.`,
 
       const accepted = params.accepted ?? (params.evidence_complete && params.evidence_convincing);
       store.update(params.taskId, {
-        pending_approval: shouldOpenHumanSignoffGate(task, accepted),
         metadata: {
           ...appendRobotReviewMetadata(task, {
             reviewer: params.reviewer,
             scope: params.scope,
             observations: params.observations,
+            concerns: params.concerns ?? [],
+            suggestions: params.suggestions ?? [],
             blind_spots: params.blind_spots,
             accepted,
             evidence_complete: params.evidence_complete,
@@ -1214,10 +1342,12 @@ This does not complete the task. Human /lgtm remains the only completion path.`,
         `Evidence complete: ${params.evidence_complete ? "yes" : "no"}\n` +
         `Evidence convincing: ${params.evidence_convincing ? "yes" : "no"}\n\n` +
         `### Observations\n${params.observations.map(o => `- ${o}`).join("\n")}\n\n` +
+        `${(params.concerns?.length ?? 0) > 0 ? `### Concerns\n${(params.concerns ?? []).map(item => `- ${item}`).join("\n")}\n\n` : ""}` +
+        `${(params.suggestions?.length ?? 0) > 0 ? `### Suggestions\n${(params.suggestions ?? []).map(item => `- ${item}`).join("\n")}\n\n` : ""}` +
         `${(params.missing_evidence?.length ?? 0) > 0 ? `### Missing evidence\n${(params.missing_evidence ?? []).map(item => `- ${item}`).join("\n")}\n\n` : ""}` +
         `### Blind spots\n${params.blind_spots}\n\n` +
         `Gate status: ${getGateStatus(store.get(params.taskId) ?? task)}\n\n` +
-        `🤖 Robot review stored. Human sign-off still requires \`/lgtm ${task.id}\`.`;
+        `🤖 Robot review stored. Manual reviews are advisory; the automatic proof gate runs through TaskClaimDone or robot_review_run.`;
 
       return Promise.resolve(textResult(result));
     },
@@ -1228,9 +1358,9 @@ This does not complete the task. Human /lgtm remains the only completion path.`,
     label: "robot_review_run",
     description: `Run the automatic robot reviewer against the current task evidence using the current session model.
 
-Runs the same Pi-native reviewer stage used automatically by \`lgtm_ask\`.
+Runs the same Pi-native reviewer stage used automatically by \`TaskClaimDone\`.
 
-This appends a new robot-review iteration. If the reviewer marks evidence incomplete or unconvincing, pending human sign-off is cleared until stronger evidence is submitted and reviewed again.`,
+This appends a new robot-review iteration. If accepted for a top-level proof task, the task completes. If rejected, the task stays open. Reviewer infrastructure failure is logged but does not block autonomy.`,
     parameters: Type.Object({
       taskId: Type.String({ description: "Task ID to review" }),
     }),
@@ -1239,46 +1369,52 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
       const task = store.get(params.taskId);
       if (!task) return textResult(`Task #${params.taskId} not found`);
       if (!task.metadata?.lgtm_evidence) {
-        return textResult(`Task #${params.taskId} has no stored evidence yet. Call lgtm_ask first.`);
+        return textResult(`Task #${params.taskId} has no stored evidence yet. Call TaskClaimDone first.`);
       }
 
       try {
         const { review, command } = await runAutomaticRobotReview(task, signal, getCurrentModelRef(_ctx.model));
         store.update(params.taskId, {
-          pending_approval: shouldOpenHumanSignoffGate(task, review.accepted),
           metadata: {
             ...appendRobotReviewMetadata(task, review),
             ...clearAutomaticReviewFailureMetadata(),
           },
         });
+        const reviewedTask = store.get(params.taskId) ?? task;
+        if (!reviewedTask.parentId && shouldCompleteAfterAcceptedReview(reviewedTask, review.accepted)) {
+          store.complete(params.taskId);
+          autoClear.trackCompletion(params.taskId, currentTurn);
+          widget.setActiveTask(params.taskId, false);
+        }
         widget.update();
 
+        const updatedTask = store.get(params.taskId) ?? task;
+        const storedReview = getLatestRobotReview(updatedTask);
         return textResult(
-        `## Automatic robot review for task #${task.id}: ${task.subject}\n` +
-        `Reviewer command: ${command}\n` +
-        `Iteration: ${getRobotReviews(store.get(params.taskId)!).length}\n` +
-        `Accepted: ${review.accepted ? "yes" : "no"}\n` +
-        `Evidence complete: ${review.evidence_complete ? "yes" : "no"}\n` +
-        `Evidence convincing: ${review.evidence_convincing ? "yes" : "no"}\n\n` +
-        (review.rubric
-          ? `### Rubric\n${Object.entries(review.rubric).map(([k, v]) => `- ${v.pass ? "PASS" : "FAIL"} ${k}: ${v.reason}`).join("\n")}\n\n`
-          : "") +
-        `### Observations\n${review.observations.map(o => `- ${o}`).join("\n")}\n\n` +
-        `${review.missing_evidence.length > 0 ? `### Missing evidence\n${review.missing_evidence.map(item => `- ${item}`).join("\n")}\n\n` : ""}` +
-        `### Blind spots\n${review.blind_spots}\n\n` +
-        `Gate status: ${getGateStatus(store.get(params.taskId) ?? task)}`,
+          `${renderProofLog(updatedTask)}\n\n` +
+          `### Automatic robot review\n` +
+          `Reviewer command: ${command}\n\n` +
+          `${storedReview ? formatRobotReview(storedReview) : formatRobotReview({ ...review, iteration: 1 })}\n\n` +
+          `Gate status: ${getGateStatus(updatedTask)}`,
         );
       } catch (err: any) {
         store.update(params.taskId, {
-          pending_approval: task.pending_approval,
           metadata: getAutomaticReviewFailureMetadata(err.message, err.rawOutput),
         });
+        const failedTask = store.get(params.taskId) ?? task;
+        if (!failedTask.parentId && failedTask.status !== "completed") {
+          store.complete(params.taskId);
+          autoClear.trackCompletion(params.taskId, currentTurn);
+          widget.setActiveTask(params.taskId, false);
+        }
         widget.update();
+        const updatedTask = store.get(params.taskId) ?? task;
         return textResult(
-          `## Automatic robot review for task #${task.id}: ${task.subject}\n` +
-          `Reviewer failed: ${err.message}\n\n` +
-          `Automatic review failures are warnings, not evidence rejections, so human sign-off is still allowed.\n\n` +
-          `Gate status: ${getGateStatus(store.get(params.taskId) ?? task)}` +
+          `${renderProofLog(updatedTask)}\n\n` +
+          `### Automatic robot review\n` +
+          `Reviewer unavailable: ${err.message}\n\n` +
+          `Autonomy continued without blocking completion.\n\n` +
+          `Gate status: ${getGateStatus(updatedTask)}` +
           (typeof err.rawOutput === "string" && err.rawOutput.trim()
             ? `\n\n${formatReviewTextBlock("Reviewer raw output", err.rawOutput.trim())}`
             : ""),
@@ -1355,23 +1491,19 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
 
         const actions: string[] = [];
         if (task.status === "pending") actions.push("▸ Start (in_progress)");
-        if (task.pending_approval && task.status !== "completed") {
-          actions.push(`(type /lgtm ${taskId} to sign off)`);
+        if (task.metadata.lgtm_evidence) {
+          actions.push(`(type /lgtm ${taskId} to view proof evidence)`);
         }
         actions.push("✗ Delete");
         actions.push("← Back");
 
-        const pendingNote = task.pending_approval && task.status !== "completed" ? `\n👀 Pending /lgtm sign-off` : "";
+        const pendingNote = task.metadata.lgtm_evidence && task.status !== "completed" ? `\nProof review: ${getGateStatus(task)}` : "";
         const em = task.metadata;
         let evidenceNote = "";
         if (em.lgtm_evidence) {
-          const parts = [`\n\nEvidence (${em.lgtm_submitted_at ?? "?"}):\n${em.lgtm_evidence}`];
-          parts.push(`Failure (likely): ${em.lgtm_failure_likely}`);
-          parts.push(`Failure (sneaky): ${em.lgtm_failure_sneaky}`);
-          if (em.lgtm_falsification_test) parts.push(`Falsification test: ${em.lgtm_falsification_test}`);
-          if (em.lgtm_remaining_uncertainty) parts.push(`Uncertainty: ${em.lgtm_remaining_uncertainty}`);
-          if (em.lgtm_verification_hints?.length) parts.push(`Hints: ${em.lgtm_verification_hints.join(", ")}`);
-          evidenceNote = parts.join("\n");
+          evidenceNote = `\n\n${renderEvidencePacket(task)}`;
+          const automaticReviewFailure = renderAutomaticReviewFailure(task);
+          if (automaticReviewFailure) evidenceNote += `\n\n${automaticReviewFailure}`;
         }
         let robotNote = "";
         const robotReviews = getRobotReviews(task);
@@ -1416,173 +1548,55 @@ This appends a new robot-review iteration. If the reviewer marks evidence incomp
   });
 
   // ──────────────────────────────────────────────────
-  // /lgtm command — human sign-off only
+  // /lgtm command — proof log viewer
   // ──────────────────────────────────────────────────
 
-  async function signOff(taskId: string, ctx: ExtensionCommandContext): Promise<void> {
+  function renderTaskEvidenceForHuman(task: Task): string {
+    return renderProofLog(task);
+  }
+
+  async function viewEvidence(taskId: string, ctx: ExtensionCommandContext): Promise<void> {
     const task = store.get(taskId);
     if (!task) { ctx.ui.notify(`Task #${taskId} not found`, "error"); return; }
-    if (task.status === "completed") { ctx.ui.notify(`Task #${taskId} already completed`, "info"); return; }
-
-    // Build human-visible state summary (the human is the final gate; we just surface friction).
-    const m = task.metadata;
-    const robotReviews = getRobotReviews(task);
-    const noEvidence = !task.pending_approval && !m.lgtm_evidence;
-    const robotRejected = robotReviews.length > 0 && !latestRobotReviewPasses(task);
-    const reviewerFailed = typeof m.robot_review_last_error === "string";
-
-    // Print evidence to the conversation so the user can review it there
-    const evidenceParts: string[] = [`Gate status: ${getGateStatus(task)}`];
-    if (m.lgtm_evidence) {
-      evidenceParts.push(...formatEvidencePackage(task));
-    } else {
-      evidenceParts.push(`(No current agent-submitted evidence — agent never called lgtm_ask, or the prior evidence was superseded.)`);
-    }
-    const historySummary = formatHistorySummary(task);
-    if (historySummary) evidenceParts.push(historySummary);
-    if (robotReviews.length > 0) {
-      evidenceParts.push(
-        `Robot reviews (${robotReviews.length} total):\n${robotReviews.map(formatRobotReview).join("\n\n")}`,
-      );
-      if (robotRejected) {
-        evidenceParts.push("⚠ Latest robot review says the evidence is not yet complete/convincing.");
-      }
-    }
-    if (evidenceParts.length > 0) {
-      ctx.ui.notify(evidenceParts.join("\n\n"), "info");
-    }
-
-    let title = `Sign off #${taskId}: ${task.subject}\nDone: ${task.done_criterion}`;
-    let signLabel = "✓ LGTM — sign off";
-    if (noEvidence) {
-      title = `⚠ Task #${taskId} has no agent-submitted evidence.\nSign off anyway?\nDone: ${task.done_criterion}`;
-      signLabel = "✓ Override — sign off without evidence";
-    } else if (robotRejected) {
-      title = `⚠ Task #${taskId} robot review rejected the evidence.\nSign off anyway?\nDone: ${task.done_criterion}`;
-      signLabel = "✓ Override — sign off despite rejected review";
-    } else if (reviewerFailed) {
-      if (task.pending_approval) {
-        title = `⚠ Task #${taskId} automatic robot review failed, but human sign-off is still allowed.\nContinue?\nDone: ${task.done_criterion}`;
-        signLabel = "✓ LGTM — sign off despite reviewer warning";
-      } else {
-        title = `⚠ Task #${taskId} automatic robot review failed.\nSign off anyway?\nDone: ${task.done_criterion}`;
-        signLabel = "✓ Override — sign off despite reviewer failure";
-      }
-    }
-    const confirm = await ctx.ui.select(title, [signLabel, "✗ Cancel"]);
-    if (confirm !== signLabel) return;
-
-    try {
-      store.complete(taskId);
-    } catch (err: any) {
-      ctx.ui.notify(err.message, "error");
-      return;
-    }
-    autoClear.trackCompletion(taskId, currentTurn);
-    widget.setActiveTask(taskId, false);
-    widget.update();
-    ctx.ui.notify(`Task #${taskId} signed off. ✓`, "info");
+    ctx.ui.notify(renderTaskEvidenceForHuman(task), "info");
   }
 
   pi.registerCommand("lgtm", {
     description:
-      "Sign off on tasks. /lgtm <id> [<id>...] signs specific tasks; /lgtm * signs ALL open tasks (READY + ACTIVE + PENDING) after confirmation. Human override allowed even when the agent never called lgtm_ask.",
+      "View the proof log and judge notes. /lgtm <id> [<id>...] shows specific tasks; /lgtm * shows all open tasks. It does not complete tasks.",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const trimmed = args.trim();
       if (trimmed === "*") {
-        // Sign off all open (non-completed) tasks at once. Human is the final gate.
         const open = store.list().filter(t => t.status !== "completed");
         if (open.length === 0) {
-          ctx.ui.notify("No open tasks to sign off.", "info");
+          ctx.ui.notify("No open tasks to inspect.", "info");
           return;
         }
-        const groups: Record<DisplayStatus, typeof open> = {
-          awaiting_signoff: [],
-          in_progress: [],
-          pending: [],
-          completed: [],
-        };
-        for (const t of open) groups[getDisplayStatus(t)].push(t);
-        const groupLabel: Record<DisplayStatus, string> = {
-          awaiting_signoff: "READY (human sign-off open)",
-          in_progress: "ACTIVE (no /lgtm evidence)",
-          pending: "PENDING (not started)",
-          completed: "DONE",
-        };
-        const lines: string[] = [];
-        for (const status of ["awaiting_signoff", "in_progress", "pending"] as DisplayStatus[]) {
-          const inBucket = groups[status];
-          if (inBucket.length === 0) continue;
-          lines.push(`  ${groupLabel[status]}:`);
-          for (const t of inBucket) {
-            const warn = status === "awaiting_signoff"
-              ? (typeof t.metadata?.robot_review_last_error === "string"
-                ? " ⚠ reviewer warning"
-                : (!latestRobotReviewPasses(t) ? " ⚠ robot rejected" : ""))
-              : "";
-            lines.push(`    #${t.id} ${t.subject}${warn}`);
-          }
-        }
-        ctx.ui.notify(`About to sign off ALL ${open.length} open tasks:\n${lines.join("\n")}`, "info");
-        const choice = await ctx.ui.select(
-          `Sign off ALL ${open.length} open tasks?`,
-          [`✓ Sign off all ${open.length}`, "← Cancel"],
-        );
-        if (!choice || choice === "← Cancel") return;
-        let signed = 0;
-        for (const t of open) {
-          try {
-            store.complete(t.id);
-            autoClear.trackCompletion(t.id, currentTurn);
-            widget.setActiveTask(t.id, false);
-            signed++;
-          } catch (err: any) {
-            ctx.ui.notify(`Failed to sign off #${t.id}: ${err.message}`, "error");
-          }
-        }
-        widget.update();
-        ctx.ui.notify(`Signed off ${signed}/${open.length} tasks. ✓`, "info");
+        ctx.ui.notify(open.map(renderTaskEvidenceForHuman).join("\n\n---\n\n"), "info");
         return;
       }
       if (!trimmed) {
-        const open = store.list().filter(t => t.status !== "completed");
+        const open = store.list();
         if (open.length === 0) {
-          ctx.ui.notify("No open tasks. Use /lgtm * to confirm-clear everything, or /lgtm <id>.", "info");
+          ctx.ui.notify("No tasks to inspect.", "info");
           return;
         }
         const tag = (t: typeof open[number]) => {
-          const s = getDisplayStatus(t);
-          if (s === "awaiting_signoff") return "[READY]   ";
-          if (s === "in_progress") return "[ACTIVE]  ";
+          if (t.status === "completed") return "[DONE]    ";
+          if (t.status === "in_progress") return "[ACTIVE]  ";
           return "[PENDING] ";
         };
         const choice = await ctx.ui.select(
-          "Sign off on (any open task — human override allowed):",
+          "View proof log:",
           open.map(t => `${tag(t)}#${t.id} ${t.subject}`).concat(["← Cancel"]),
         );
         if (!choice || choice === "← Cancel") return;
         const match = choice.match(/#(\d+)/);
-        if (match) signOff(match[1], ctx);
+        if (match) await viewEvidence(match[1], ctx);
         return;
       }
-      // Accept one or more whitespace-separated IDs (also tolerate `#1` and commas).
       const ids = trimmed.split(/[\s,]+/).map(t => t.replace(/^#/, "")).filter(Boolean);
-      if (ids.length === 1) {
-        await signOff(ids[0], ctx);
-        return;
-      }
-      const results: string[] = [];
-      for (const id of ids) {
-        const before = store.get(id);
-        await signOff(id, ctx);
-        const after = store.get(id);
-        if (after?.status === "completed" && before?.status !== "completed") {
-          results.push(`✓ #${id}`);
-        } else {
-          results.push(`✗ #${id}`);
-        }
-      }
-      ctx.ui.notify(`Batch sign-off: ${results.join(", ")}`, "info");
+      for (const id of ids) await viewEvidence(id, ctx);
     },
   });
 }

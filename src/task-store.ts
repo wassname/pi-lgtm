@@ -83,13 +83,14 @@ export class TaskStore {
     finally { releaseLock(this.lockPath); }
   }
 
-  create(subject: string, description: string, done_criterion: string, progress_label?: string, metadata?: Record<string, any>): Task {
+  create(subject: string, description: string, done_criterion: string, progress_label?: string, metadata?: Record<string, any>, parentId?: string): Task {
     return this.withLock(() => {
+      if (parentId && !this.tasks.has(parentId)) throw new Error(`Parent task #${parentId} not found`);
       const now = Date.now();
       const task: Task = {
         id: String(this.nextId++),
         subject, description, done_criterion,
-        pending_approval: false,
+        parentId,
         status: "pending",
         progress_label,
         metadata: metadata ?? {},
@@ -116,9 +117,9 @@ export class TaskStore {
     subject?: string;
     description?: string;
     done_criterion?: string;
-    pending_approval?: boolean;
     progress_label?: string;
     metadata?: Record<string, any>;
+    parentId?: string | null;
     add_blocks?: string[];
     add_blocked_by?: string[];
   }): { task: Task | undefined; changedFields: string[]; warnings: string[] } {
@@ -129,13 +130,10 @@ export class TaskStore {
       const changedFields: string[] = [];
       const warnings: string[] = [];
 
-      // Self-completion is allowed for trivial tasks that never escalated to lgtm_ask.
-      // Once a task has stored lgtm evidence, completion must go through /lgtm so the
-      // human gate + robot review can't be skipped.
-      if (fields.status === "completed") {
-        if (task.pending_approval || task.metadata?.lgtm_evidence || (Array.isArray(task.metadata?.lgtm_history) && task.metadata.lgtm_history.length > 0)) {
-          throw new Error(`Use /lgtm ${id} to complete this task — completion_mode=lgtm because evidence was submitted.`);
-        }
+      // Subtasks are normal checklist items. Top-level tasks are goals and need a proof
+      // claim plus automatic review; TaskClaimDone is the only agent path that completes them.
+      if (fields.status === "completed" && !task.parentId) {
+        throw new Error(`Top-level task #${id} requires proof. Use TaskClaimDone with evidence and failure modes; subtasks can be completed directly.`);
       }
 
       if (fields.status === "deleted") {
@@ -151,7 +149,6 @@ export class TaskStore {
       if (fields.subject !== undefined) { task.subject = fields.subject; changedFields.push("subject"); }
       if (fields.description !== undefined) { task.description = fields.description; changedFields.push("description"); }
       if (fields.done_criterion !== undefined) { task.done_criterion = fields.done_criterion; changedFields.push("done_criterion"); }
-      if (fields.pending_approval !== undefined) { task.pending_approval = fields.pending_approval; changedFields.push("pending_approval"); }
       if (fields.progress_label !== undefined) { task.progress_label = fields.progress_label; changedFields.push("progress_label"); }
 
       if (fields.metadata !== undefined) {
@@ -160,6 +157,10 @@ export class TaskStore {
           else task.metadata[key] = value;
         }
         changedFields.push("metadata");
+      }
+
+      if (fields.parentId !== undefined) {
+        throw new Error("parentId is creation-only. Create subtasks with TaskCreate(parentId); do not downgrade top-level proof goals.");
       }
 
       if (fields.add_blocks?.length) {
@@ -191,7 +192,7 @@ export class TaskStore {
     });
   }
 
-  /** Complete a task. Called only by /lgtm. The human-confirm gate lives in the command layer. */
+  /** Complete a task. Called by accepted proof review or direct subtask completion paths. */
   complete(id: string): Task {
     return this.withLock(() => {
       const task = this.tasks.get(id);

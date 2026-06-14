@@ -8,7 +8,6 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     subject: "Test",
     description: "Desc",
     done_criterion: "done",
-    pending_approval: false,
     status: "pending",
     progress_label: undefined,
     metadata: {},
@@ -25,9 +24,8 @@ describe("getReviewBadges", () => {
     expect(getReviewBadges(makeTask())).toBe("[···]");
   });
 
-  it("fills tool/robot/human slots independently", () => {
+  it("fills evidence/review/completed slots independently", () => {
     const task = makeTask({
-      pending_approval: true,
       metadata: {
         lgtm_evidence: "npm test",
         robot_reviews: [{
@@ -35,6 +33,8 @@ describe("getReviewBadges", () => {
           reviewer: "opencode",
           scope: "task evidence",
           observations: ["Observed one unchecked edge case"],
+          concerns: ["Evidence does not cover prod traffic."],
+          suggestions: ["Inspect one prod traffic sample."],
           blind_spots: "Did not inspect prod traffic",
           accepted: false,
           evidence_complete: false,
@@ -46,27 +46,26 @@ describe("getReviewBadges", () => {
       },
     });
 
-    expect(getReviewBadges(task)).toBe("[🛠🤖👀]");
+    expect(getReviewBadges(task)).toBe("[🛠🤖·]");
   });
 
-  it("hides the human badge once the task is completed", () => {
+  it("fills the completed badge once the task is completed", () => {
     const task = makeTask({
-      pending_approval: true,
       status: "completed",
       metadata: { lgtm_evidence: "ok" },
     });
 
-    expect(getReviewBadges(task)).toBe("[🛠··]");
+    expect(getReviewBadges(task)).toBe("[🛠·✓]");
   });
 });
 
 describe("review state helpers", () => {
-  it("reports completion mode as direct before any lgtm evidence", () => {
-    expect(getCompletionMode(makeTask())).toBe("direct");
+  it("reports completion mode as proof for top-level tasks", () => {
+    expect(getCompletionMode(makeTask())).toBe("proof");
   });
 
-  it("reports completion mode as lgtm after evidence history exists", () => {
-    expect(getCompletionMode(makeTask({ metadata: { lgtm_history: [{ iteration: 1 }] } }))).toBe("lgtm");
+  it("reports completion mode as direct for subtasks", () => {
+    expect(getCompletionMode(makeTask({ parentId: "1" }))).toBe("direct");
   });
 
   it("reports superseded when only history remains", () => {
@@ -75,30 +74,17 @@ describe("review state helpers", () => {
 });
 
 describe("getGateStatus", () => {
-  it("reports ready when human sign-off is open", () => {
-    expect(getGateStatus(makeTask({
-      pending_approval: true,
-      metadata: { lgtm_evidence: "ok" },
-    }))).toBe("ready for human sign-off via /lgtm 1");
+  it("reports top-level proof requirement before evidence", () => {
+    expect(getGateStatus(makeTask())).toBe("top-level task requires TaskClaimDone evidence before completion");
   });
 
-  it("reports blocking reviewer failure when human sign-off is closed", () => {
+  it("reports non-blocking reviewer failure", () => {
     expect(getGateStatus(makeTask({
       metadata: {
         lgtm_evidence: "ok",
         robot_review_last_error: "Unexpected token 'a'",
       },
-    }))).toContain("blocked: automatic robot review failed");
-  });
-
-  it("reports reviewer failure as a warning when human sign-off stays open", () => {
-    expect(getGateStatus(makeTask({
-      pending_approval: true,
-      metadata: {
-        lgtm_evidence: "ok",
-        robot_review_last_error: "Unexpected token 'a'",
-      },
-    }))).toContain("warning: automatic robot review failed");
+    }))).toContain("review unavailable; autonomy continues");
   });
 
   it("reports rejected robot review when latest review does not accept", () => {
@@ -110,6 +96,8 @@ describe("getGateStatus", () => {
           reviewer: "opencode",
           scope: "task evidence",
           observations: ["Observed missing output"],
+          concerns: ["The current evidence is summary-only."],
+          suggestions: ["Paste the literal output."],
           blind_spots: "none",
           accepted: false,
           evidence_complete: false,
@@ -119,12 +107,11 @@ describe("getGateStatus", () => {
           mode: "manual",
         }],
       },
-    }))).toBe("blocked: latest robot review rejected the evidence");
+    }))).toBe("latest proof review rejected the evidence; strengthen the proof and try again");
   });
 
   it("keeps rejection higher priority than a later reviewer warning", () => {
     expect(getGateStatus(makeTask({
-      pending_approval: true,
       metadata: {
         lgtm_evidence: "ok",
         robot_review_last_error: "timeout",
@@ -133,6 +120,8 @@ describe("getGateStatus", () => {
           reviewer: "opencode",
           scope: "task evidence",
           observations: ["Observed missing output"],
+          concerns: ["The current evidence is summary-only."],
+          suggestions: ["Paste the literal output."],
           blind_spots: "none",
           accepted: false,
           evidence_complete: false,
@@ -142,7 +131,7 @@ describe("getGateStatus", () => {
           mode: "manual",
         }],
       },
-    }))).toBe("blocked: latest robot review rejected the evidence");
+    }))).toBe("latest proof review rejected the evidence; strengthen the proof and try again");
   });
 });
 
@@ -155,13 +144,7 @@ describe("getDisplayStatus", () => {
     expect(getDisplayStatus(makeTask({ status: "in_progress" }))).toBe("in_progress");
   });
 
-  it("returns awaiting_signoff when pending_approval is set", () => {
-    expect(getDisplayStatus(makeTask({ status: "in_progress", pending_approval: true })))
-      .toBe("awaiting_signoff");
-  });
-
-  it("returns completed regardless of pending_approval flag", () => {
-    expect(getDisplayStatus(makeTask({ status: "completed", pending_approval: true })))
-      .toBe("completed");
+  it("returns completed for completed tasks", () => {
+    expect(getDisplayStatus(makeTask({ status: "completed" }))).toBe("completed");
   });
 });

@@ -4,11 +4,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TaskStore } from "../src/task-store.js";
 
-// Helper: create a task and set pending_approval so complete() works
-function createAndApprove(store: TaskStore, subject: string) {
-  const task = store.create(subject, "Desc", "done criterion");
-  store.update(task.id, { pending_approval: true });
-  return task;
+// Helper: create a subtask, which can be ticked off directly.
+function createSubtask(store: TaskStore, subject: string) {
+  const parent = store.create(`${subject} parent`, "Desc", "done criterion");
+  return store.create(subject, "Desc", "done criterion", undefined, undefined, parent.id);
 }
 
 describe("TaskStore (in-memory)", () => {
@@ -28,7 +27,6 @@ describe("TaskStore (in-memory)", () => {
     expect(t1.subject).toBe("First task");
     expect(t1.description).toBe("Description 1");
     expect(t1.done_criterion).toBe("criterion 1");
-    expect(t1.pending_approval).toBe(false);
   });
 
   it("creates tasks with optional fields", () => {
@@ -110,7 +108,7 @@ describe("TaskStore (in-memory)", () => {
     expect(task.metadata).toEqual({ a: 1, c: 3, d: 4 });
   });
 
-  it("sets up bidirectional blocks via addBlocks", () => {
+  it("sets up bidirectional blocks via add_blocks", () => {
     store.create("Blocker", "Desc", "done");
     store.create("Blocked", "Desc", "done");
 
@@ -122,7 +120,7 @@ describe("TaskStore (in-memory)", () => {
     expect(t2.blockedBy).toContain("1");
   });
 
-  it("sets up bidirectional blocks via addBlockedBy", () => {
+  it("sets up bidirectional blocks via add_blocked_by", () => {
     store.create("Blocker", "Desc", "done");
     store.create("Blocked", "Desc", "done");
 
@@ -157,7 +155,7 @@ describe("TaskStore (in-memory)", () => {
   });
 
   it("clears completed tasks", () => {
-    createAndApprove(store, "Completed");
+    store.create("Completed", "Desc", "done");
     store.create("Pending", "Desc", "done");
     store.complete("1");
 
@@ -168,36 +166,28 @@ describe("TaskStore (in-memory)", () => {
     expect(store.list()[0].id).toBe("2");
   });
 
-  it("allows TaskUpdate(status=completed) for trivial tasks (no lgtm evidence)", () => {
-    store.create("Trivial", "Desc", "done");
-    const { task, changedFields } = store.update("1", { status: "completed" });
+  it("allows TaskUpdate(status=completed) for subtasks", () => {
+    createSubtask(store, "Checklist item");
+    const { task, changedFields } = store.update("2", { status: "completed" });
     expect(task!.status).toBe("completed");
     expect(changedFields).toContain("status");
   });
 
-  it("blocks TaskUpdate(status=completed) when pending_approval=true", () => {
-    store.create("Significant", "Desc", "done");
-    store.update("1", { pending_approval: true });
-    expect(() => store.update("1", { status: "completed" })).toThrow("/lgtm");
+  it("blocks TaskUpdate(status=completed) for top-level tasks", () => {
+    store.create("Goal", "Desc", "done");
+    expect(() => store.update("1", { status: "completed" })).toThrow("Top-level task #1 requires proof");
   });
 
-  it("blocks TaskUpdate(status=completed) when lgtm evidence is stored (even if review rejected)", () => {
+  it("keeps top-level completion gated even after proof evidence exists", () => {
     store.create("Escalated", "Desc", "done");
-    // lgtm_ask path stores evidence; if robot review rejects, pending_approval becomes false.
-    // The agent must not be able to bypass the gate by self-completing afterwards.
-    store.update("1", { metadata: { lgtm_evidence: "literal output" }, pending_approval: false });
-    expect(() => store.update("1", { status: "completed" })).toThrow("/lgtm");
+    store.update("1", { metadata: { lgtm_evidence: "literal output" } });
+    expect(() => store.update("1", { status: "completed" })).toThrow("TaskClaimDone");
   });
 
-  it("blocks TaskUpdate(status=completed) after evidence was superseded into history", () => {
-    store.create("Superseded", "Desc", "done");
-    store.update("1", {
-      metadata: {
-        lgtm_history: [{ iteration: 1, supersede_reason: "threshold changed" }],
-      },
-      pending_approval: false,
-    });
-    expect(() => store.update("1", { status: "completed" })).toThrow("completion_mode=lgtm");
+  it("rejects changing parentId after creation", () => {
+    store.create("Parent", "Desc", "done");
+    store.create("Child", "Desc", "done");
+    expect(() => store.update("2", { parentId: "1" })).toThrow("parentId is creation-only");
   });
 
   it("returns not found for update on non-existent task", () => {
@@ -206,16 +196,15 @@ describe("TaskStore (in-memory)", () => {
     expect(changedFields).toEqual([]);
   });
 
-  it("complete() works without pending_approval (human override path)", () => {
-    // The /lgtm command layer is the human gate; complete() itself is permissive.
+  it("complete() is the internal proof-review completion path", () => {
     store.create("Test", "Desc", "done");
     const task = store.complete("1");
     expect(task.status).toBe("completed");
   });
 
-  it("complete() works when pending_approval=true", () => {
-    createAndApprove(store, "Test");
-    const task = store.complete("1");
+  it("complete() also works for subtasks", () => {
+    createSubtask(store, "Test");
+    const task = store.complete("2");
     expect(task.status).toBe("completed");
   });
 
@@ -307,8 +296,7 @@ describe("TaskStore (in-memory)", () => {
     store.create("Blocker", "Desc", "done");
     store.create("Blocked", "Desc", "done");
     store.update("1", { add_blocks: ["2"] });
-    // Set pending_approval on task 1 so complete() works via /lgtm path
-    store.update("1", { pending_approval: true });
+    // complete() is the internal proof-review completion path.
     store.complete("1");
 
     store.clearCompleted();
@@ -317,7 +305,7 @@ describe("TaskStore (in-memory)", () => {
     expect(t2.blockedBy).toEqual([]);
   });
 
-  it("handles multiple addBlocks in one call", () => {
+  it("handles multiple add_blocks in one call", () => {
     store.create("Blocker", "Desc", "done");
     store.create("B1", "Desc", "done");
     store.create("B2", "Desc", "done");
@@ -329,21 +317,21 @@ describe("TaskStore (in-memory)", () => {
     expect(store.get("3")!.blockedBy).toContain("1");
   });
 
-  it("addBlockedBy warns on self-dependency", () => {
+  it("add_blocked_by warns on self-dependency", () => {
     store.create("Self", "Desc", "done");
     const { warnings } = store.update("1", { add_blocked_by: ["1"] });
     expect(store.get("1")!.blockedBy).toContain("1");
     expect(warnings).toContain("#1 blocks itself");
   });
 
-  it("addBlockedBy warns on dangling ref", () => {
+  it("add_blocked_by warns on dangling ref", () => {
     store.create("Real", "Desc", "done");
     const { warnings } = store.update("1", { add_blocked_by: ["9999"] });
     expect(store.get("1")!.blockedBy).toContain("9999");
     expect(warnings).toContain("#9999 does not exist");
   });
 
-  it("addBlockedBy warns on cycle", () => {
+  it("add_blocked_by warns on cycle", () => {
     store.create("A", "Desc", "done");
     store.create("B", "Desc", "done");
     store.update("1", { add_blocks: ["2"] });
@@ -358,7 +346,7 @@ describe("TaskStore (in-memory)", () => {
 
   it("list sorts pending → in_progress → completed with all three present", () => {
     store.create("Pending task", "Desc", "done");
-    createAndApprove(store, "Completed task");
+    store.create("Completed task", "Desc", "done");
     store.create("In-progress task", "Desc", "done");
     store.create("Another pending", "Desc", "done");
 
@@ -413,7 +401,6 @@ describe("TaskStore (file-backed)", () => {
     const store1 = new TaskStore(testListId);
     store1.create("Done task", "Desc", "done");
     store1.create("Pending task", "Desc", "done");
-    store1.update("1", { pending_approval: true });
     store1.complete("1");
 
     const store2 = new TaskStore(testListId);
@@ -429,7 +416,6 @@ describe("TaskStore (file-backed)", () => {
     store1.create("In progress", "Desc", "done");
     store1.create("Done", "Desc", "done");
     store1.update("2", { status: "in_progress" });
-    store1.update("3", { pending_approval: true });
     store1.complete("3");
 
     const store2 = new TaskStore(testListId);
@@ -473,7 +459,6 @@ describe("TaskStore (absolute path)", () => {
     const store1 = new TaskStore(absFilePath);
     store1.create("Pending", "Desc", "done");
     store1.create("Completed", "Desc", "done");
-    store1.update("2", { pending_approval: true });
     store1.complete("2");
 
     const raw = JSON.parse(readFileSync(absFilePath, "utf-8"));

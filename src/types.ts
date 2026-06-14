@@ -9,7 +9,7 @@ export interface Task {
   subject: string;
   description: string;
   done_criterion: string;      // required: what "done" looks like
-  pending_approval: boolean;   // set by lgtm_ask, required before /lgtm
+  parentId?: string;           // no parent = top-level goal, requires proof claim to complete
   status: TaskStatus;
   progress_label?: string;
   metadata: Record<string, any>;

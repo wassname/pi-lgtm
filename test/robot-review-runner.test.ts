@@ -15,7 +15,7 @@ describe("robot review runner helpers", () => {
       command: "pi",
       args: ["--mode", "json"],
     });
-    expect(getPiInvocation(["-p"], { PI_LGTM_PI_BIN: "/custom/pi" } as NodeJS.ProcessEnv)).toEqual({
+    expect(getPiInvocation(["-p"], { PI_PROOF_TASKS_PI_BIN: "/custom/pi" } as NodeJS.ProcessEnv)).toEqual({
       command: "/custom/pi",
       args: ["-p"],
     });
@@ -46,8 +46,8 @@ describe("robot review runner helpers", () => {
   });
 
   it("uses configured timeout or falls back to default", () => {
-    expect(getRobotReviewTimeoutMs({ PI_LGTM_ROBOT_REVIEW_TIMEOUT_MS: "2500" } as NodeJS.ProcessEnv)).toBe(2500);
-    expect(getRobotReviewTimeoutMs({ PI_LGTM_ROBOT_REVIEW_TIMEOUT_MS: "bad" } as NodeJS.ProcessEnv)).toBe(DEFAULT_ROBOT_REVIEW_TIMEOUT_MS);
+    expect(getRobotReviewTimeoutMs({ PI_PROOF_TASKS_ROBOT_REVIEW_TIMEOUT_MS: "2500" } as NodeJS.ProcessEnv)).toBe(2500);
+    expect(getRobotReviewTimeoutMs({ PI_PROOF_TASKS_ROBOT_REVIEW_TIMEOUT_MS: "bad" } as NodeJS.ProcessEnv)).toBe(DEFAULT_ROBOT_REVIEW_TIMEOUT_MS);
   });
 
   it("formats the current model as the reviewer model ref", () => {

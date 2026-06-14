@@ -2,8 +2,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { archiveCurrentEvidence, buildArtifactRecords, getCurrentEvidenceIteration, getEvidenceHistory } from "../src/index.js";
-import { appendRobotReviewMetadata, getLatestRobotReview, getRobotReviews, relaxAdvisoryVerificationHints, shouldOpenHumanSignoffGate } from "../src/robot-review.js";
+import { archiveCurrentEvidence, buildArtifactRecords, buildRobotReviewPrompt, getCurrentEvidenceIteration, getEvidenceHistory, renderEvidencePacket, renderProofLog } from "../src/index.js";
+import { appendRobotReviewMetadata, getLatestRobotReview, getRobotReviews, hasCompleteProofClaim, relaxAdvisoryVerificationHints, shouldCompleteAfterAcceptedReview } from "../src/robot-review.js";
 import type { Task } from "../src/types.js";
 
 function makeTask(overrides: Partial<Task> = {}): Task {
@@ -12,7 +12,6 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     subject: "Test",
     description: "Desc",
     done_criterion: "done",
-    pending_approval: false,
     status: "pending",
     progress_label: undefined,
     metadata: {},
@@ -25,10 +24,23 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 }
 
 describe("robot review helpers", () => {
-  it("reopens the human gate when accepted review exists for stored evidence", () => {
-    expect(shouldOpenHumanSignoffGate(makeTask({ metadata: { lgtm_evidence: "literal output" } }), true)).toBe(true);
-    expect(shouldOpenHumanSignoffGate(makeTask({ metadata: { lgtm_evidence: "literal output" } }), false)).toBe(false);
-    expect(shouldOpenHumanSignoffGate(makeTask(), true)).toBe(false);
+  it("completes only after accepted review and complete proof claim", () => {
+    const task = makeTask({
+      metadata: {
+        lgtm_evidence: "literal output",
+        lgtm_failure_likely: "wrong command",
+        lgtm_failure_sneaky: "right output for wrong reason",
+        lgtm_failure_unknown: "untested platform",
+        lgtm_falsification_test: "npm test\npass",
+        lgtm_evidence_reasoning: "the test output rules out the named failures for this scope",
+        lgtm_verification_hints: ["test/robot-review.test.ts shows the expectation"],
+        lgtm_remaining_uncertainty: "does not test prod install",
+      },
+    });
+    expect(hasCompleteProofClaim(task)).toBe(true);
+    expect(shouldCompleteAfterAcceptedReview(task, true)).toBe(true);
+    expect(shouldCompleteAfterAcceptedReview(task, false)).toBe(false);
+    expect(shouldCompleteAfterAcceptedReview(makeTask({ metadata: { lgtm_evidence: "literal output" } }), true)).toBe(false);
   });
 
   it("reads legacy single-review metadata", () => {
@@ -50,7 +62,7 @@ describe("robot review helpers", () => {
   });
 
   it("builds artifact records with absolute path and sha256", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-lgtm-"));
+    const dir = mkdtempSync(join(tmpdir(), "pi-proof-tasks-"));
     const path = join(dir, "evidence.log");
     writeFileSync(path, "hello\n");
 
@@ -66,7 +78,9 @@ describe("robot review helpers", () => {
         lgtm_evidence: "literal output",
         lgtm_failure_likely: "wrong seed",
         lgtm_failure_sneaky: "wrong threshold",
+        lgtm_failure_unknown: "untested environment",
         lgtm_falsification_test: "pytest -k check",
+        lgtm_evidence_reasoning: "pytest output distinguishes the expected passing path from the named failures",
         lgtm_verification_hints: ["see line 5"],
         lgtm_remaining_uncertainty: "not load tested",
         lgtm_submitted_at: "2026-06-07T00:00:00.000Z",
@@ -86,6 +100,8 @@ describe("robot review helpers", () => {
       reviewer: "auto",
       scope: "task evidence",
       observations: ["Observed commit, push, and test logs"],
+      concerns: [],
+      suggestions: [],
       blind_spots: "Did not inspect interactive UI",
       accepted: false,
       evidence_complete: true,
@@ -97,6 +113,7 @@ describe("robot review helpers", () => {
         evidence_covers_done_criterion: { reason: "verbatim logs match", pass: true },
         falsification_test_runnable: { reason: "command and output shown", pass: true },
         failure_modes_addressed: { reason: "plausible top risks named", pass: true },
+        evidence_distinguishes_success: { reason: "evidence rules out named failures", pass: true },
         verification_hints_actionable: { reason: "paths are vague", pass: false },
       },
     });
@@ -112,6 +129,8 @@ describe("robot review helpers", () => {
       reviewer: "auto",
       scope: "task evidence",
       observations: ["Observed vague summary only"],
+      concerns: [],
+      suggestions: [],
       blind_spots: "Did not rerun tests",
       accepted: false,
       evidence_complete: true,
@@ -123,6 +142,7 @@ describe("robot review helpers", () => {
         evidence_covers_done_criterion: { reason: "summary only", pass: false },
         falsification_test_runnable: { reason: "command and output shown", pass: true },
         failure_modes_addressed: { reason: "plausible top risks named", pass: true },
+        evidence_distinguishes_success: { reason: "evidence does not rule out summary-only failure", pass: false },
         verification_hints_actionable: { reason: "paths are vague", pass: false },
       },
     });
@@ -131,12 +151,40 @@ describe("robot review helpers", () => {
     expect(review.evidence_convincing).toBe(false);
   });
 
+  it("renders one compact evidence packet for both human and robot review", () => {
+    const task = makeTask({
+      metadata: {
+        lgtm_evidence: "literal output",
+        lgtm_failure_likely: "wrong seed",
+        lgtm_failure_sneaky: "wrong threshold",
+        lgtm_failure_unknown: "does not test UI rendering",
+        lgtm_falsification_test: "pytest -k check\nPASSED",
+        lgtm_evidence_reasoning: "The passing pytest transcript distinguishes success from wrong-threshold and wrong-seed failures for this test scope.",
+        lgtm_verification_hints: ["test/robot-review.test.ts contains the new guard test"],
+        lgtm_remaining_uncertainty: "not load tested",
+        lgtm_submitted_at: "2026-06-14T00:00:00.000Z",
+        lgtm_commands: [{ cmd: "npm test", exit_code: 0, stdout_path: "/tmp/test.log" }],
+        lgtm_evidence_artifacts: [{ path: "/tmp/test.log", sha256: "abc", bytes: 123 }],
+      },
+    });
+
+    const packet = renderEvidencePacket(task);
+    const prompt = buildRobotReviewPrompt(task);
+    expect(packet).toContain("## Goal");
+    expect(packet).toContain("## Planned evidence / UAT");
+    expect(packet).toContain("## Attempt 1");
+    expect(prompt).toContain(packet);
+    expect(prompt).toContain("does this evidence prove success for the stated goal");
+  });
+
   it("appends robot reviews as iterations", () => {
     const task = makeTask();
     const metadata1 = appendRobotReviewMetadata(task, {
       reviewer: "opencode",
       scope: "task evidence",
       observations: ["Observed missing benchmark output"],
+      concerns: ["The current evidence does not show the claimed speedup."],
+      suggestions: ["Add the benchmark transcript for the claimed speedup."],
       blind_spots: "Did not inspect prod config",
       accepted: false,
       evidence_complete: false,
@@ -150,6 +198,8 @@ describe("robot review helpers", () => {
       reviewer: "opencode",
       scope: "updated task evidence",
       observations: ["Observed benchmark output and test transcript"],
+      concerns: [],
+      suggestions: [],
       blind_spots: "Did not inspect long-run stability",
       accepted: true,
       evidence_complete: true,
@@ -166,6 +216,74 @@ describe("robot review helpers", () => {
     expect(reviews[1].iteration).toBe(2);
     expect(getLatestRobotReview(task2)?.evidence_convincing).toBe(true);
     expect(task2.metadata.robot_review_iteration_count).toBe(2);
+  });
+
+  it("renders a simple proof log with judgement and suggestions", () => {
+    const taskWithEvidence = makeTask({
+      metadata: {
+        lgtm_evidence: "npm test\n125 passed",
+        lgtm_failure_likely: "old package name still in README",
+        lgtm_failure_sneaky: "top-level direct completion still slips through",
+        lgtm_failure_unknown: "fresh judge command fails in a real session",
+        lgtm_falsification_test: "npm test\n125 passed",
+        lgtm_evidence_reasoning: "The test transcript and grep distinguish the intended behavior from stale workflow regressions.",
+        lgtm_verification_hints: ["README.md install block shows pi-proof-tasks"],
+        lgtm_remaining_uncertainty: "Did not exercise every model provider.",
+        lgtm_submitted_at: "2026-06-14T00:00:00.000Z",
+      },
+    });
+    const task = makeTask({
+      metadata: {
+        ...taskWithEvidence.metadata,
+        ...appendRobotReviewMetadata(taskWithEvidence, {
+          reviewer: "auto",
+          scope: "proof log",
+          observations: ["Observed the test transcript and renamed package."],
+          concerns: ["The live Pi session path is still untested."],
+          suggestions: ["Run one self-hosted TaskClaimDone UAT."],
+          blind_spots: "Did not inspect external auth state",
+          accepted: false,
+          evidence_complete: true,
+          evidence_convincing: false,
+          missing_evidence: ["self-hosted TaskClaimDone UAT"],
+          submitted_at: "2026-06-14T00:01:00.000Z",
+          mode: "auto",
+        }),
+      },
+    });
+
+    const log = renderProofLog(task);
+    expect(log).toContain("# Task #1: Test");
+    expect(log).toContain("## Goal");
+    expect(log).toContain("## Planned evidence / UAT");
+    expect(log).toContain("## Attempt 1");
+    expect(log).toContain("### Submitted evidence");
+    expect(log).toContain("### Judgement");
+    expect(log).toContain("Refused by auto");
+    expect(log).toContain("Run one self-hosted TaskClaimDone UAT.");
+  });
+
+  it("renders reviewer-unavailable proof logs for fail-open completion notes", () => {
+    const task = makeTask({
+      status: "completed",
+      metadata: {
+        lgtm_evidence: "npm test\n125 passed",
+        lgtm_failure_likely: "old package name still in README",
+        lgtm_failure_sneaky: "top-level direct completion still slips through",
+        lgtm_failure_unknown: "fresh judge command fails in a real session",
+        lgtm_falsification_test: "npm test\n125 passed",
+        lgtm_evidence_reasoning: "The test transcript and grep distinguish the intended behavior from stale workflow regressions.",
+        lgtm_verification_hints: ["README.md install block shows pi-proof-tasks"],
+        lgtm_remaining_uncertainty: "Did not exercise every model provider.",
+        robot_review_last_error: "judge auth failed",
+      },
+    });
+
+    const log = renderProofLog(task);
+    expect(log).toContain("completed with reviewer unavailable");
+    expect(log).toContain("### Judgement");
+    expect(log).toContain("judge auth failed");
+    expect(log).toContain("Autonomy continued without blocking completion.");
   });
 });
 

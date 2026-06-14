@@ -7,6 +7,8 @@ export interface RobotReviewRecord {
   reviewer: string;
   scope: string;
   observations: string[];
+  concerns: string[];
+  suggestions: string[];
   blind_spots: string;
   accepted: boolean;
   evidence_complete: boolean;
@@ -46,6 +48,8 @@ function normalizeReview(value: unknown, index: number): RobotReviewRecord | und
     reviewer,
     scope,
     observations,
+    concerns: toStringArray(review.concerns),
+    suggestions: toStringArray(review.suggestions),
     blind_spots: typeof review.blind_spots === "string" ? review.blind_spots : "not recorded",
     accepted: typeof review.accepted === "boolean"
       ? review.accepted
@@ -69,6 +73,8 @@ function getLegacyRobotReview(task: Task): RobotReviewRecord | undefined {
     reviewer: typeof task.metadata?.robot_review_reviewer === "string" ? task.metadata.robot_review_reviewer : "unknown",
     scope: typeof task.metadata?.robot_review_scope === "string" ? task.metadata.robot_review_scope : "unknown",
     observations,
+    concerns: toStringArray(task.metadata?.robot_review_concerns),
+    suggestions: toStringArray(task.metadata?.robot_review_suggestions),
     blind_spots: typeof task.metadata?.robot_review_blind_spots === "string" ? task.metadata.robot_review_blind_spots : "not recorded",
     accepted: typeof task.metadata?.robot_review_accepted === "boolean"
       ? task.metadata.robot_review_accepted
@@ -101,14 +107,33 @@ export function getLatestRobotReview(task: Task): RobotReviewRecord | undefined 
   return reviews.length > 0 ? reviews[reviews.length - 1] : undefined;
 }
 
-export function shouldOpenHumanSignoffGate(task: Task, reviewAccepted: boolean): boolean {
-  return reviewAccepted && typeof task.metadata?.lgtm_evidence === "string" && task.metadata.lgtm_evidence.length > 0;
+function hasNonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+export function hasCompleteProofClaim(task: Task): boolean {
+  const metadata = task.metadata ?? {};
+  return [
+    metadata.lgtm_evidence,
+    metadata.lgtm_failure_likely,
+    metadata.lgtm_failure_sneaky,
+    metadata.lgtm_failure_unknown,
+    metadata.lgtm_falsification_test,
+    metadata.lgtm_evidence_reasoning,
+    metadata.lgtm_remaining_uncertainty,
+  ].every(hasNonEmptyString)
+    && Array.isArray(metadata.lgtm_verification_hints)
+    && metadata.lgtm_verification_hints.some(hasNonEmptyString);
+}
+
+export function shouldCompleteAfterAcceptedReview(task: Task, reviewAccepted: boolean): boolean {
+  return reviewAccepted && hasCompleteProofClaim(task);
 }
 
 export function relaxAdvisoryVerificationHints(review: Omit<RobotReviewRecord, "iteration">): Omit<RobotReviewRecord, "iteration"> {
   const rubric = review.rubric;
   if (!rubric || review.evidence_complete !== true) return review;
-  const requiredCoreKeys = ["evidence_covers_done_criterion", "falsification_test_runnable", "failure_modes_addressed"];
+  const requiredCoreKeys = ["evidence_covers_done_criterion", "falsification_test_runnable", "failure_modes_addressed", "evidence_distinguishes_success"];
   if (!requiredCoreKeys.every((key) => rubric[key]?.pass === true)) return review;
   const failedKeys = Object.entries(rubric)
     .filter(([, item]) => item.pass !== true)
@@ -122,6 +147,8 @@ export function relaxAdvisoryVerificationHints(review: Omit<RobotReviewRecord, "
       ...review.observations,
       "Verification hints were weak, but treated as advisory because the verbatim evidence already covered the done criterion.",
     ],
+    concerns: review.concerns,
+    suggestions: review.suggestions,
     missing_evidence: review.missing_evidence.filter((item) => item !== "verification_hints_actionable" && !/verification hint/i.test(item)),
   };
 }
@@ -138,6 +165,8 @@ export function appendRobotReviewMetadata(task: Task, review: Omit<RobotReviewRe
     robot_review_reviewer: latest.reviewer,
     robot_review_scope: latest.scope,
     robot_review_observations: latest.observations,
+    robot_review_concerns: latest.concerns,
+    robot_review_suggestions: latest.suggestions,
     robot_review_blind_spots: latest.blind_spots,
     robot_review_accepted: latest.accepted,
     robot_review_evidence_complete: latest.evidence_complete,
