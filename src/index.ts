@@ -20,7 +20,7 @@
  *   /tasks            — Interactive task management menu
  *   /lgtm <id...>     — View the proof log for one or more tasks
  *   /lgtm *           — View all open task proof logs
- *   /lgtm             — Pick from open tasks to inspect proof logs
+ *   /lgtm             — Pick a task to inspect proof logs
  */
 
 import { spawn } from "node:child_process";
@@ -56,6 +56,25 @@ import { TaskWidget, type UICtx } from "./ui/task-widget.js";
 
 function textResult(msg: string) {
   return { content: [{ type: "text" as const, text: msg }], details: undefined as any };
+}
+
+export type LgtmCommandSpec =
+  | { kind: "menu" }
+  | { kind: "view_all" }
+  | { kind: "view"; ids: string[] }
+  | { kind: "error"; message: string };
+
+export function parseLgtmArgs(args: string): LgtmCommandSpec {
+  const trimmed = args.trim();
+  if (!trimmed) return { kind: "menu" };
+  if (trimmed === "*") return { kind: "view_all" };
+
+  const tokens = trimmed.split(/[\s,]+/).map(token => token.trim()).filter(Boolean);
+  if (tokens[0] === "clear") {
+    return { kind: "error", message: "Task clearing lives in /tasks now. /lgtm is viewer-only." };
+  }
+
+  return { kind: "view", ids: tokens.map(token => token.replace(/^#/, "")).filter(Boolean) };
 }
 
 const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "TaskClaimDone", "lgtm_supersede", "robot_review_ask", "robot_review_run"]);
@@ -1555,48 +1574,73 @@ This appends a new robot-review iteration. If accepted for a top-level proof tas
     return renderProofLog(task);
   }
 
+  function showProofLog(task: Task) {
+    pi.sendMessage({
+      customType: "proof-log",
+      content: renderTaskEvidenceForHuman(task),
+      display: true,
+      details: { taskId: task.id },
+    });
+  }
+
+  function getLgtmTaskLabel(task: Task): string {
+    const tag = task.status === "completed"
+      ? "[DONE]    "
+      : task.status === "in_progress"
+        ? "[ACTIVE]  "
+        : "[PENDING] ";
+    return `${tag}#${task.id} ${task.subject}`;
+  }
+
   async function viewEvidence(taskId: string, ctx: ExtensionCommandContext): Promise<void> {
     const task = store.get(taskId);
-    if (!task) { ctx.ui.notify(`Task #${taskId} not found`, "error"); return; }
-    ctx.ui.notify(renderTaskEvidenceForHuman(task), "info");
+    if (!task) {
+      ctx.ui.notify(`Task #${taskId} not found`, "error");
+      return;
+    }
+    showProofLog(task);
+  }
+
+  async function viewAllOpenProofLogs(ctx: ExtensionCommandContext): Promise<void> {
+    const open = store.list().filter(t => t.status !== "completed");
+    if (open.length === 0) {
+      ctx.ui.notify("No open tasks to inspect.", "info");
+      return;
+    }
+    for (const task of open) showProofLog(task);
   }
 
   pi.registerCommand("lgtm", {
     description:
-      "View the proof log and judge notes. /lgtm <id> [<id>...] shows specific tasks; /lgtm * shows all open tasks. It does not complete tasks.",
+      "View the proof log and judge notes. /lgtm <id> [<id>...] shows specific tasks; /lgtm * shows all open tasks; task management lives in /tasks.",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
-      const trimmed = args.trim();
-      if (trimmed === "*") {
-        const open = store.list().filter(t => t.status !== "completed");
-        if (open.length === 0) {
-          ctx.ui.notify("No open tasks to inspect.", "info");
-          return;
-        }
-        ctx.ui.notify(open.map(renderTaskEvidenceForHuman).join("\n\n---\n\n"), "info");
+      const parsed = parseLgtmArgs(args);
+      if (parsed.kind === "error") {
+        ctx.ui.notify(parsed.message, "error");
         return;
       }
-      if (!trimmed) {
-        const open = store.list();
-        if (open.length === 0) {
-          ctx.ui.notify("No tasks to inspect.", "info");
-          return;
-        }
-        const tag = (t: typeof open[number]) => {
-          if (t.status === "completed") return "[DONE]    ";
-          if (t.status === "in_progress") return "[ACTIVE]  ";
-          return "[PENDING] ";
-        };
+      if (parsed.kind === "menu") {
+        const tasks = store.list();
         const choice = await ctx.ui.select(
-          "View proof log:",
-          open.map(t => `${tag(t)}#${t.id} ${t.subject}`).concat(["← Cancel"]),
+          "LGTM",
+          ["View all open proof logs", ...tasks.map(getLgtmTaskLabel), "← Cancel"],
         );
         if (!choice || choice === "← Cancel") return;
+        if (choice === "View all open proof logs") return viewAllOpenProofLogs(ctx);
         const match = choice.match(/#(\d+)/);
-        if (match) await viewEvidence(match[1], ctx);
+        if (match) return viewEvidence(match[1], ctx);
         return;
       }
-      const ids = trimmed.split(/[\s,]+/).map(t => t.replace(/^#/, "")).filter(Boolean);
-      for (const id of ids) await viewEvidence(id, ctx);
+      if (parsed.kind === "view_all") return viewAllOpenProofLogs(ctx);
+      for (const id of parsed.ids) await viewEvidence(id, ctx);
+    },
+    getArgumentCompletions: (args: string) => {
+      const trimmed = args.trim();
+      const tasks = store.list();
+      if (!trimmed) return [{ value: "*", label: "*" }];
+      const prefix = trimmed.replace(/^#/, "");
+      return ["*", ...tasks.filter(task => task.id.startsWith(prefix)).map(task => task.id)]
+        .map(value => ({ value, label: value }));
     },
   });
 }
