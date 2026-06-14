@@ -1,5 +1,12 @@
 # @wassname/pi-lgtm
 
+Original ask:
+> I would like a task list where
+> 1) the top level tasks are goals and proof.
+> 2) A form that makes the agent think about "what are the most likely, subtle, failure modes and what cheap and easy to review evidence can distinguish between them and goal success".
+> 3) A subagent provides independant sanity check of on the evidence before completing
+> 4) - wassname
+
 Help your agent track goals and aim for human sign off.
 
 A [pi](https://pi.dev) extension that adds structured human sign-off to task tracking. Fork of [@tintinweb/pi-tasks](https://github.com/tintinweb/pi-tasks) with a minimal LGTM layer.
