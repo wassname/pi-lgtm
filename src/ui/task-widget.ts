@@ -1,11 +1,11 @@
 /**
- * task-widget.ts — Persistent widget showing task list with status icons and progress.
+ * task-widget.ts — Persistent widget showing open goals with simple status icons and progress.
  *
- * Display style matches Claude Code's task list:
- *   ✔ completed tasks (strikethrough + dim)
+ * Display style:
  *   ◼ in_progress tasks
  *   ◻ pending tasks
  *   ✳/✽ actively executing task (star spinner with progress_label text)
+ * Completed tasks stay in storage but are hidden from the collapsed widget.
  */
 
 import { truncateToWidth } from "@mariozechner/pi-tui";
@@ -15,18 +15,23 @@ import type { TaskStore } from "../task-store.js";
 // ---- Types ----
 
 export type Theme = {
-  fg(color: string, text: string): string;
-  bold(text: string): string;
-  strikethrough(text: string): string;
+	fg(color: string, text: string): string;
+	bold(text: string): string;
+	strikethrough(text: string): string;
 };
 
 export type UICtx = {
-  setStatus(key: string, text: string | undefined): void;
-  setWidget(
-    key: string,
-    content: undefined | ((tui: any, theme: Theme) => { render(): string[]; invalidate(): void }),
-    options?: { placement?: "aboveEditor" | "belowEditor" },
-  ): void;
+	setStatus(key: string, text: string | undefined): void;
+	setWidget(
+		key: string,
+		content:
+			| undefined
+			| ((
+					tui: any,
+					theme: Theme,
+			  ) => { render(): string[]; invalidate(): void }),
+		options?: { placement?: "aboveEditor" | "belowEditor" },
+	): void;
 };
 
 /** Star spinner frames for animated active task indicator (matches Claude Code). */
@@ -36,225 +41,254 @@ const MAX_VISIBLE_TASKS = 5;
 
 /** Per-task runtime metrics (elapsed time, token usage). */
 export interface TaskMetrics {
-  startedAt: number;
-  inputTokens: number;
-  outputTokens: number;
+	startedAt: number;
+	inputTokens: number;
+	outputTokens: number;
 }
 
 /** Format milliseconds as a human-readable duration (e.g., "2m 49s", "1h 3m"). */
 function formatDuration(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  if (totalSec < 60) return `${totalSec}s`;
-  const min = Math.floor(totalSec / 60);
-  const sec = totalSec % 60;
-  if (min < 60) return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
-  const hr = Math.floor(min / 60);
-  const remMin = min % 60;
-  return remMin > 0 ? `${hr}h ${remMin}m` : `${hr}h`;
+	const totalSec = Math.floor(ms / 1000);
+	if (totalSec < 60) return `${totalSec}s`;
+	const min = Math.floor(totalSec / 60);
+	const sec = totalSec % 60;
+	if (min < 60) return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
+	const hr = Math.floor(min / 60);
+	const remMin = min % 60;
+	return remMin > 0 ? `${hr}h ${remMin}m` : `${hr}h`;
 }
 
 /** Format token count with k suffix (e.g., "4.1k", "850"). */
 function formatTokens(n: number): string {
-  if (n < 1000) return String(n);
-  return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+	if (n < 1000) return String(n);
+	return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
 }
 
 // ---- Widget ----
 
 export class TaskWidget {
-  private uiCtx: UICtx | undefined;
-  private widgetFrame = 0;
-  private widgetInterval: ReturnType<typeof setInterval> | undefined;
-  /** IDs of tasks currently being actively executed (show spinner). */
-  private activeTaskIds = new Set<string>();
-  /** Per-task runtime metrics keyed by task ID. */
-  private metrics = new Map<string, TaskMetrics>();
-  /** Cached TUI instance for requestRender() calls. */
-  private tui: any | undefined;
-  /** Whether the widget callback is currently registered. */
-  private widgetRegistered = false;
+	private uiCtx: UICtx | undefined;
+	private widgetFrame = 0;
+	private widgetInterval: ReturnType<typeof setInterval> | undefined;
+	/** IDs of tasks currently being actively executed (show spinner). */
+	private activeTaskIds = new Set<string>();
+	/** Per-task runtime metrics keyed by task ID. */
+	private metrics = new Map<string, TaskMetrics>();
+	/** Cached TUI instance for requestRender() calls. */
+	private tui: any | undefined;
+	/** Whether the widget callback is currently registered. */
+	private widgetRegistered = false;
 
-  constructor(private store: TaskStore) {}
+	constructor(private store: TaskStore) {}
 
-  setStore(store: TaskStore) {
-    this.store = store;
-  }
+	setStore(store: TaskStore) {
+		this.store = store;
+	}
 
-  setUICtx(ctx: UICtx) {
-    this.uiCtx = ctx;
-  }
+	setUICtx(ctx: UICtx) {
+		this.uiCtx = ctx;
+	}
 
-  /** Add or remove a task from the active spinner set. */
-  setActiveTask(taskId: string | undefined, active = true) {
-    if (taskId && active) {
-      this.activeTaskIds.add(taskId);
-      if (!this.metrics.has(taskId)) {
-        this.metrics.set(taskId, { startedAt: Date.now(), inputTokens: 0, outputTokens: 0 });
-      }
-      this.ensureTimer();
-    } else if (taskId) {
-      this.activeTaskIds.delete(taskId);
-    }
-    this.update();
-  }
+	/** Add or remove a task from the active spinner set. */
+	setActiveTask(taskId: string | undefined, active = true) {
+		if (taskId && active) {
+			this.activeTaskIds.add(taskId);
+			if (!this.metrics.has(taskId)) {
+				this.metrics.set(taskId, {
+					startedAt: Date.now(),
+					inputTokens: 0,
+					outputTokens: 0,
+				});
+			}
+			this.ensureTimer();
+		} else if (taskId) {
+			this.activeTaskIds.delete(taskId);
+		}
+		this.update();
+	}
 
-  /** Record token usage for the currently active task(s). */
-  addTokenUsage(inputTokens: number, outputTokens: number) {
-    // Distribute to all currently active tasks
-    for (const id of this.activeTaskIds) {
-      const m = this.metrics.get(id);
-      if (m) {
-        m.inputTokens += inputTokens;
-        m.outputTokens += outputTokens;
-      }
-    }
-  }
+	/** Record token usage for the currently active task(s). */
+	addTokenUsage(inputTokens: number, outputTokens: number) {
+		// Distribute to all currently active tasks
+		for (const id of this.activeTaskIds) {
+			const m = this.metrics.get(id);
+			if (m) {
+				m.inputTokens += inputTokens;
+				m.outputTokens += outputTokens;
+			}
+		}
+	}
 
-  /** Ensure the widget update timer is running. */
-  ensureTimer() {
-    if (!this.widgetInterval) {
-      this.widgetInterval = setInterval(() => this.update(), 80);
-    }
-  }
+	/** Ensure the widget update timer is running. */
+	ensureTimer() {
+		if (!this.widgetInterval) {
+			this.widgetInterval = setInterval(() => this.update(), 80);
+		}
+	}
 
-  /** Build widget lines from current live state. Called from the render callback. */
-  private renderWidget(tui: any, theme: Theme): string[] {
-    const tasks = this.store.list();
-    const w = tui.terminal.columns;
-    const truncate = (line: string) => truncateToWidth(line, w);
+	/** Build widget lines from current live state. Called from the render callback. */
+	private renderWidget(tui: any, theme: Theme): string[] {
+		const tasks = this.store.list();
+		const w = tui.terminal.columns;
+		const truncate = (line: string) => truncateToWidth(line, w);
 
-    if (tasks.length === 0) return [];
+		if (tasks.length === 0) return [];
 
-    const counts = { completed: 0, in_progress: 0, pending: 0 };
-    for (const t of tasks) counts[getDisplayStatus(t)]++;
+		const counts = { completed: 0, in_progress: 0, pending: 0 };
+		for (const t of tasks) counts[getDisplayStatus(t)]++;
 
-    const parts: string[] = [];
-    if (counts.completed > 0) parts.push(`${counts.completed} done`);
-    if (counts.in_progress > 0) parts.push(`${counts.in_progress} in progress`);
-    if (counts.pending > 0) parts.push(`${counts.pending} open`);
-    const statusText = `${tasks.length} tasks (${parts.join(", ")})`;
+		const visibleTasks = tasks.filter((task) => task.status !== "completed");
+		if (visibleTasks.length === 0) return [];
 
-    const spinnerChar = SPINNER[this.widgetFrame % SPINNER.length];
-    const lines: string[] = [truncate(theme.fg("accent", "●") + " " + theme.fg("accent", statusText))];
+		const parts: string[] = [];
+		if (counts.completed > 0) parts.push(`${counts.completed} done hidden`);
+		if (counts.in_progress > 0) parts.push(`${counts.in_progress} in progress`);
+		if (counts.pending > 0) parts.push(`${counts.pending} open`);
+		const statusText = `${tasks.length} goals (${parts.join(", ")})`;
 
-    const visible = tasks.slice(0, MAX_VISIBLE_TASKS);
-    for (let i = 0; i < visible.length; i++) {
-      const task = visible[i];
-      const isActive = this.activeTaskIds.has(task.id) && task.status === "in_progress";
+		const spinnerChar = SPINNER[this.widgetFrame % SPINNER.length];
+		const lines: string[] = [
+			truncate(theme.fg("accent", "●") + " " + theme.fg("accent", statusText)),
+		];
 
-      let icon: string;
-      if (isActive) {
-        icon = theme.fg("accent", spinnerChar);
-      } else if (task.status === "completed") {
-        icon = theme.fg("success", "✔");
-      } else if (task.status === "in_progress") {
-        icon = theme.fg("accent", "◼");
-      } else {
-        icon = "◻";
-      }
+		const visible = visibleTasks.slice(0, MAX_VISIBLE_TASKS);
+		for (let i = 0; i < visible.length; i++) {
+			const task = visible[i];
+			const isActive =
+				this.activeTaskIds.has(task.id) && task.status === "in_progress";
 
-      let suffix = "";
-      if (task.status === "pending" && task.blockedBy.length > 0) {
-        const openBlockers = task.blockedBy.filter(bid => {
-          const blocker = this.store.get(bid);
-          return blocker && blocker.status !== "completed";
-        });
-        if (openBlockers.length > 0) {
-          suffix = theme.fg("dim", ` › blocked by ${openBlockers.map(id => "#" + id).join(", ")}`);
-        }
-      }
+			let icon: string;
+			if (isActive) {
+				icon = theme.fg("accent", spinnerChar);
+			} else if (task.status === "in_progress") {
+				icon = theme.fg("accent", "◼");
+			} else {
+				icon = "◻";
+			}
 
-      let text: string;
-      if (isActive) {
-        const form = task.progress_label || task.subject;
-        const m = this.metrics.get(task.id);
-        let stats = "";
-        if (m) {
-          const elapsed = formatDuration(Date.now() - m.startedAt);
-          const tokenParts: string[] = [];
-          if (m.inputTokens > 0) tokenParts.push(`↑ ${formatTokens(m.inputTokens)}`);
-          if (m.outputTokens > 0) tokenParts.push(`↓ ${formatTokens(m.outputTokens)}`);
-          stats = tokenParts.length > 0
-            ? ` ${theme.fg("dim", `(${elapsed} · ${tokenParts.join(" ")})`)}`
-            : ` ${theme.fg("dim", `(${elapsed})`)}`;
-        }
-        text = `  ${icon} ${theme.fg("dim", "#" + task.id)} ${theme.fg("accent", form + "…")}${stats}`;
-      } else if (task.status === "completed") {
-        text = `  ${icon} ${theme.fg("dim", theme.strikethrough("#" + task.id + " " + task.subject))}`;
-      } else {
-        text = `  ${icon} ${theme.fg("dim", "#" + task.id)} ${task.subject}`;
-      }
+			let suffix = "";
+			if (task.status === "pending" && task.blockedBy.length > 0) {
+				const openBlockers = task.blockedBy.filter((bid) => {
+					const blocker = this.store.get(bid);
+					return blocker && blocker.status !== "completed";
+				});
+				if (openBlockers.length > 0) {
+					suffix = theme.fg(
+						"dim",
+						` › blocked by ${openBlockers.map((id) => "#" + id).join(", ")}`,
+					);
+				}
+			}
 
-      lines.push(truncate(text + suffix));
-    }
+			let text: string;
+			if (isActive) {
+				const form = task.progress_label || task.subject;
+				const m = this.metrics.get(task.id);
+				let stats = "";
+				if (m) {
+					const elapsed = formatDuration(Date.now() - m.startedAt);
+					const tokenParts: string[] = [];
+					if (m.inputTokens > 0)
+						tokenParts.push(`↑ ${formatTokens(m.inputTokens)}`);
+					if (m.outputTokens > 0)
+						tokenParts.push(`↓ ${formatTokens(m.outputTokens)}`);
+					stats =
+						tokenParts.length > 0
+							? ` ${theme.fg("dim", `(${elapsed}, ${tokenParts.join(" ")})`)}`
+							: ` ${theme.fg("dim", `(${elapsed})`)}`;
+				}
+				text = `  ${icon} ${theme.fg("dim", "#" + task.id)} ${theme.fg("accent", form + "…")}${stats}`;
+			} else {
+				text = `  ${icon} ${theme.fg("dim", "#" + task.id)} ${task.subject}`;
+			}
 
-    if (tasks.length > MAX_VISIBLE_TASKS) {
-      lines.push(truncate(theme.fg("dim", `    … and ${tasks.length - MAX_VISIBLE_TASKS} more`)));
-    }
+			lines.push(truncate(text + suffix));
+		}
 
-    return lines;
-  }
+		if (visibleTasks.length > MAX_VISIBLE_TASKS) {
+			lines.push(
+				truncate(
+					theme.fg(
+						"dim",
+						`    … and ${visibleTasks.length - MAX_VISIBLE_TASKS} more open`,
+					),
+				),
+			);
+		}
 
-  /** Force an immediate widget update. */
-  update() {
-    if (!this.uiCtx) return;
-    const tasks = this.store.list();
+		return lines;
+	}
 
-    // Transition: visible → hidden
-    if (tasks.length === 0) {
-      if (this.widgetRegistered) {
-        this.uiCtx.setWidget("tasks", undefined);
-        this.widgetRegistered = false;
-      }
-      if (this.widgetInterval) {
-        clearInterval(this.widgetInterval);
-        this.widgetInterval = undefined;
-      }
-      return;
-    }
+	/** Force an immediate widget update. */
+	update() {
+		if (!this.uiCtx) return;
+		const tasks = this.store.list();
+		const visibleTasks = tasks.filter((task) => task.status !== "completed");
 
-    // Prune stale active IDs (deleted or no longer in_progress)
-    for (const id of this.activeTaskIds) {
-      const t = this.store.get(id);
-      if (!t || t.status !== "in_progress") {
-        this.activeTaskIds.delete(id);
-        this.metrics.delete(id);
-      }
-    }
+		// Transition: visible → hidden
+		if (visibleTasks.length === 0) {
+			if (this.widgetRegistered) {
+				this.uiCtx.setWidget("tasks", undefined);
+				this.widgetRegistered = false;
+			}
+			if (this.widgetInterval) {
+				clearInterval(this.widgetInterval);
+				this.widgetInterval = undefined;
+			}
+			return;
+		}
 
-    // Check if any task needs animation
-    const hasActiveSpinner = tasks.some(t => this.activeTaskIds.has(t.id) && t.status === "in_progress");
-    if (hasActiveSpinner) {
-      this.ensureTimer();
-    } else if (!hasActiveSpinner && this.widgetInterval) {
-      clearInterval(this.widgetInterval);
-      this.widgetInterval = undefined;
-    }
+		// Prune stale active IDs (deleted or no longer in_progress)
+		for (const id of this.activeTaskIds) {
+			const t = this.store.get(id);
+			if (!t || t.status !== "in_progress") {
+				this.activeTaskIds.delete(id);
+				this.metrics.delete(id);
+			}
+		}
 
-    this.widgetFrame++;
+		// Check if any task needs animation
+		const hasActiveSpinner = tasks.some(
+			(t) => this.activeTaskIds.has(t.id) && t.status === "in_progress",
+		);
+		if (hasActiveSpinner) {
+			this.ensureTimer();
+		} else if (!hasActiveSpinner && this.widgetInterval) {
+			clearInterval(this.widgetInterval);
+			this.widgetInterval = undefined;
+		}
 
-    // Transition: hidden → visible — register widget callback once
-    if (!this.widgetRegistered) {
-      this.uiCtx.setWidget("tasks", (tui, theme) => {
-        this.tui = tui;
-        return { render: () => this.renderWidget(tui, theme), invalidate: () => {} };
-      }, { placement: "aboveEditor" });
-      this.widgetRegistered = true;
-    } else if (this.tui) {
-      // Widget already registered — just request a re-render
-      this.tui.requestRender();
-    }
-  }
+		this.widgetFrame++;
 
-  dispose() {
-    if (this.widgetInterval) {
-      clearInterval(this.widgetInterval);
-      this.widgetInterval = undefined;
-    }
-    if (this.uiCtx) {
-      this.uiCtx.setWidget("tasks", undefined);
-    }
-    this.widgetRegistered = false;
-    this.tui = undefined;
-  }
+		// Transition: hidden → visible — register widget callback once
+		if (!this.widgetRegistered) {
+			this.uiCtx.setWidget(
+				"tasks",
+				(tui, theme) => {
+					this.tui = tui;
+					return {
+						render: () => this.renderWidget(tui, theme),
+						invalidate: () => {},
+					};
+				},
+				{ placement: "aboveEditor" },
+			);
+			this.widgetRegistered = true;
+		} else if (this.tui) {
+			// Widget already registered — just request a re-render
+			this.tui.requestRender();
+		}
+	}
+
+	dispose() {
+		if (this.widgetInterval) {
+			clearInterval(this.widgetInterval);
+			this.widgetInterval = undefined;
+		}
+		if (this.uiCtx) {
+			this.uiCtx.setWidget("tasks", undefined);
+		}
+		this.widgetRegistered = false;
+		this.tui = undefined;
+	}
 }

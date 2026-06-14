@@ -13,7 +13,7 @@ A [pi](https://pi.dev) extension that adds proof-gated top-level tasks to task t
 
 The core idea: subtasks are normal checklist items, but top-level tasks are goals. Agents cannot mark top-level tasks complete directly. They must call `TaskClaimDone` with auditable evidence, UAT hints, and explicit failure-mode analysis. A fresh judge then accepts or rejects the claim. Accepted review completes the task; rejected review leaves it open with suggestions.
 
-Humans can use `/lgtm` to view the proof log and sanity-check the reviewer notes later. `/lgtm` is intentionally thin: proof viewing lives there, task management stays in `/tasks`.
+Humans can use `/lgtm` to view the proof log and sanity-check the reviewer notes later. `/lgtm` is intentionally thin: proof viewing lives there, task management stays in `/tasks`. Long submitted-evidence blocks are previewed inline and truncated after about 16 lines, with the full artifact path shown in the proof log.
 
 ## Install
 
@@ -44,9 +44,8 @@ Stripped: `TaskExecute`, `TaskOutput`, `TaskStop`, `process-tracker.ts`, subagen
 ## Widget
 
 ```
-● 3 tasks (1 done, 1 in progress, 1 open)
-  ✔ #1 Design schema
-  ✳ #2 Implementing cache layer… (2m 49s · ↑ 4.1k ↓ 1.2k)
+● 3 goals (1 done hidden, 1 in progress, 1 open)
+  ✳ #2 Implementing cache layer… (2m 49s, ↑ 4.1k ↓ 1.2k)
   ◻ #3 Load test
 ```
 
@@ -142,9 +141,9 @@ Interactive task-management menu: view tasks, create task, delete a selected tas
 ```text
 Top-level task:
 pending -> in_progress -> TaskClaimDone
-                       -> current evidence iteration N 🛠
-                       -> robot review iteration(s) 🤖
-                       -> completed ✓          if latest robot review accepts
+                       -> current evidence iteration N
+                       -> robot review iteration(s)
+                       -> completed            if latest robot review accepts
                        -> remains open         if reviewer rejects
                        -> completed            if reviewer infrastructure fails (fail-open, note logged)
                        -> lgtm_supersede or newer TaskClaimDone -> superseded history + fresh current evidence
@@ -168,7 +167,7 @@ Override via env:
 
 ```bash
 PI_TASKS=off          # in-memory (CI)
-PI_TASKS=sprint-1     # named shared list at ~/.pi/tasks/sprint-1.json
+PI_TASKS=sprint-1     # named project-local list at .pi/tasks/sprint-1.json
 PI_TASKS=/abs/path    # explicit path
 PI_TASKS_DEBUG=1      # trace to stderr
 ```
@@ -178,7 +177,7 @@ PI_TASKS_DEBUG=1      # trace to stderr
 ```text
 src/
 ├── index.ts          # tools + /tasks + /lgtm evidence viewer + widget + event handlers
-├── review-badges.ts # Review badge helpers for evidence/review/completion lanes
+├── review-badges.ts # Review state helpers for proof/completion lanes
 ├── robot-review.ts  # Robot review iteration storage + compatibility helpers
 ├── types.ts         # Task, TaskStatus types
 ├── task-store.ts    # File-backed store with CRUD, locking, complete() method
