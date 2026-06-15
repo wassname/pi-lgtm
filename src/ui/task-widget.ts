@@ -8,9 +8,18 @@
  * Completed tasks stay in storage but are hidden from the collapsed widget.
  */
 
-import { truncateToWidth } from "@mariozechner/pi-tui";
-import { getDisplayStatus } from "../review-badges.js";
+import type { Task } from "../types.js";
 import type { TaskStore } from "../task-store.js";
+
+// Simple truncation fallback
+function truncateToWidth(line: string, maxWidth: number): string {
+	if (line.length <= maxWidth) return line;
+	return line.slice(0, maxWidth - 1) + "…";
+}
+
+function getDisplayStatus(task: Task): "in_progress" | "pending" | "completed" {
+	return task.status;
+}
 
 // ---- Types ----
 

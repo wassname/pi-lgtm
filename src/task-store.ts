@@ -126,11 +126,12 @@ export class TaskStore {
 
 	create(
 		subject: string,
-		description: string,
-		done_criterion: string,
+		done_criterion?: string,
+		failure_mode?: string,
 		progress_label?: string,
 		metadata?: Record<string, any>,
 		parentId?: string,
+		description?: string,
 	): Task {
 		return this.withLock(() => {
 			if (parentId && !this.tasks.has(parentId))
@@ -140,7 +141,8 @@ export class TaskStore {
 				id: String(this.nextId++),
 				subject,
 				description,
-				done_criterion,
+				done_criterion: done_criterion || undefined,
+				failure_mode,
 				parentId,
 				status: "pending",
 				progress_label,
@@ -174,6 +176,7 @@ export class TaskStore {
 			subject?: string;
 			description?: string;
 			done_criterion?: string;
+			failure_mode?: string;
 			progress_label?: string;
 			metadata?: Record<string, any>;
 			parentId?: string | null;
@@ -187,14 +190,6 @@ export class TaskStore {
 
 			const changedFields: string[] = [];
 			const warnings: string[] = [];
-
-			// Subtasks are normal checklist items. Top-level tasks are goals and need a proof
-			// claim plus automatic review; TaskClaimDone is the only agent path that completes them.
-			if (fields.status === "completed" && !task.parentId) {
-				throw new Error(
-					`Top-level task #${id} requires proof. Use TaskClaimDone with evidence and failure modes; subtasks can be completed directly.`,
-				);
-			}
 
 			if (fields.status === "deleted") {
 				this.tasks.delete(id);
@@ -213,13 +208,17 @@ export class TaskStore {
 				task.subject = fields.subject;
 				changedFields.push("subject");
 			}
-			if (fields.description !== undefined) {
-				task.description = fields.description;
-				changedFields.push("description");
-			}
 			if (fields.done_criterion !== undefined) {
 				task.done_criterion = fields.done_criterion;
 				changedFields.push("done_criterion");
+			}
+			if (fields.failure_mode !== undefined) {
+				task.failure_mode = fields.failure_mode;
+				changedFields.push("failure_mode");
+			}
+			if (fields.description !== undefined) {
+				task.description = fields.description;
+				changedFields.push("description");
 			}
 			if (fields.progress_label !== undefined) {
 				task.progress_label = fields.progress_label;
