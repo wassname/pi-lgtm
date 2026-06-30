@@ -19,17 +19,15 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { AutoClearManager } from "./auto-clear.js";
 import {
+	type CadenceConfig,
+	type CadenceState,
 	createCadenceState,
 	drainReminderForContext,
 	evaluateToolResult,
-	type CadenceConfig,
-	type CadenceState,
 } from "./reminder-cadence.js";
 import { TaskStore } from "./task-store.js";
 import { loadTasksConfig } from "./tasks-config.js";
