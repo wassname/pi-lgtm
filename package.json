@@ -48,7 +48,7 @@
     "extensions": [
       "./src/index.ts"
     ],
-    "video": "",
-    "image": ""
+    "video": "https://cdn.jsdelivr.net/gh/wassname/pi-lgtm@main/media/demo.mp4",
+    "image": "https://cdn.jsdelivr.net/gh/wassname/pi-lgtm@main/media/screenshot.png"
   }
 }
